@@ -15,6 +15,7 @@ from gt4py.cartesian.backend.dace_backend import SDFGManager
 from gt4py.cartesian.backend.dace_stencil_object import DaCeStencilObject, add_optional_fields
 from gt4py.cartesian.backend.module_generator import make_args_data_from_gtir
 from gt4py.cartesian.lazy_stencil import LazyStencil
+from gt4py.cartesian.gtc.passes.gtir_prune_unused_parameters import prune_unused_parameters
 
 
 if TYPE_CHECKING:
@@ -26,6 +27,7 @@ class DaCeLazyStencil(LazyStencil, SDFGConvertible):
         if "dace" not in builder.backend.name:
             raise ValueError("Trying to build a DaCeLazyStencil for non-dace backend.")
         super().__init__(builder=builder)
+        self.signature = []
 
     @property
     def field_info(self) -> Dict[str, Any]:
@@ -47,7 +49,8 @@ class DaCeLazyStencil(LazyStencil, SDFGConvertible):
     def __sdfg__(self, *args, **kwargs) -> dace.SDFG:
         sdfg_manager = SDFGManager(self.builder)
         args_data = make_args_data_from_gtir(self.builder.gtir_pipeline)
-        arg_names = [arg.name for arg in self.builder.gtir.api_signature]
+        assert self.signature != []
+        arg_names = self.signature
         assert args_data.domain_info is not None
         norm_kwargs = DaCeStencilObject.normalize_args(
             *args,
@@ -69,5 +72,9 @@ class DaCeLazyStencil(LazyStencil, SDFGConvertible):
         return {}
 
     def __sdfg_signature__(self) -> Tuple[Sequence[str], Sequence[str]]:
-        args = [arg.name for arg in self.builder.gtir.api_signature]
-        return (args, [])
+        if self.signature == []:
+            self.signature = [
+                str(p)
+                for p in self.builder.gtir_pipeline.apply([prune_unused_parameters]).param_names
+            ]
+        return (self.signature, [])
