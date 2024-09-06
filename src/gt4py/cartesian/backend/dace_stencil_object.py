@@ -37,7 +37,11 @@ def _extract_array_infos(field_args, device) -> Dict[str, Optional[ArgsInfo]]:
 
 
 def add_optional_fields(
-    sdfg: dace.SDFG, field_info: Dict[str, Any], parameter_info: Dict[str, Any], **kwargs: Any
+    sdfg: dace.SDFG,
+    field_info: Dict[str, Any],
+    parameter_info: Dict[str, Any],
+    empty_sdfg=False,
+    **kwargs: Any,
 ) -> dace.SDFG:
     sdfg = copy.deepcopy(sdfg)
     for name, info in field_info.items():
@@ -52,7 +56,12 @@ def add_optional_fields(
             if isinstance(kwargs[name], dace.data.Scalar):
                 sdfg.add_scalar(name, dtype=kwargs[name].dtype)
             else:
-                sdfg.add_symbol(name, stype=dace.typeclass(type(kwargs[name])))
+                # If the SDFG is empty we had parameters as scalar so DaCe can take care
+                # of culling it properly (symbol will create a mapping issue)
+                if empty_sdfg:
+                    sdfg.add_scalar(name, dtype=dace.typeclass(type(kwargs[name])))
+                else:
+                    sdfg.add_symbol(name, stype=dace.typeclass(type(kwargs[name])))
     return sdfg
 
 

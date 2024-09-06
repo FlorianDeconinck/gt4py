@@ -10,15 +10,30 @@ from typing import TYPE_CHECKING, Any, Dict, Optional, Sequence, Set, Tuple
 
 import dace
 from dace.frontend.python.common import SDFGConvertible
+from dace.sdfg.analysis import cfg
 
 from gt4py.cartesian.backend.dace_backend import SDFGManager
 from gt4py.cartesian.backend.dace_stencil_object import DaCeStencilObject, add_optional_fields
 from gt4py.cartesian.backend.module_generator import make_args_data_from_gtir
+from gt4py.cartesian.definitions import AccessKind
+from gt4py.cartesian.gtc.dace.nodes import StencilComputation
 from gt4py.cartesian.lazy_stencil import LazyStencil
 
 
 if TYPE_CHECKING:
     from gt4py.cartesian.stencil_builder import StencilBuilder
+
+
+def _is_unexpanded_sdfg_empty(sdfg: dace.SDFG):
+    """
+    Check that we have at least one StencilComputation, e.g.
+    the unexpanded SDFG is not empty
+    """
+    for nstate in cfg.stateorder_topological_sort(sdfg):
+        for sdfg_node in nstate.nodes():
+            if isinstance(sdfg_node, StencilComputation):
+                return False
+    return True
 
 
 class DaCeLazyStencil(LazyStencil, SDFGConvertible):
@@ -58,12 +73,29 @@ class DaCeLazyStencil(LazyStencil, SDFGConvertible):
             **kwargs,
         )
         sdfg = sdfg_manager.frozen_sdfg(origin=norm_kwargs["origin"], domain=norm_kwargs["domain"])
-        return add_optional_fields(
+        sdfg = add_optional_fields(
             sdfg,
             field_info=args_data.field_info,
             parameter_info=args_data.parameter_info,
+            empty_sdfg=_is_unexpanded_sdfg_empty(sdfg),
             **norm_kwargs,
         )
+        # Update downstream symbol mapping for non-field parameters
+        # to caught mapping for unused parameters
+        for nstate in cfg.stateorder_topological_sort(sdfg):
+            for sdfg_node in nstate.nodes():
+                if isinstance(sdfg_node, StencilComputation):
+                    sdfg_node.symbol_mapping.update(
+                        {
+                            name: dace.symbol(
+                                name,
+                                dtype=dace.typeclass(type(kwargs[name])),
+                            )
+                            for name, info in args_data.parameter_info.items()
+                            if info.access == AccessKind.NONE
+                        }
+                    )
+        return sdfg
 
     def __sdfg_closure__(self, reevaluate: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
         return {}
