@@ -185,6 +185,17 @@ class StencilComputation(library.LibraryNode):
                 "I",
                 "J",
             ]
+        if oir_node.loop_order == common.LoopOrder.PARALLEL:
+            expansion_order = [
+                    "TileI", 
+                    "TileJ", 
+                    "Sections", 
+                    "TileK", # allow loop blocking in vertical direction
+                    "Stages", 
+                    "I", 
+                    "J", 
+                    "K",
+            ]
         _set_expansion_order(self, expansion_order)
 
     def get_extents(self, he):
