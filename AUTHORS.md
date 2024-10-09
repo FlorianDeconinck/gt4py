@@ -35,3 +35,4 @@
 - Vogt, Hannes. ETH Zurich - CSCS
 - Weber, Benjamin. MeteoSwiss
 - Wicky, Tobias. Allen Institute for AI
+- Yuan, Xingqiu. SAIC
