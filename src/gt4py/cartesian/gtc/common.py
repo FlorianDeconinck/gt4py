@@ -11,6 +11,7 @@ from __future__ import annotations
 import enum
 import functools
 import typing
+import numbers
 from typing import (
     Any,
     ClassVar,
@@ -118,7 +119,7 @@ class DataType(eve.IntEnum):
         return self == self.BOOL
 
     def isinteger(self):
-        return self in (self.INT8, self.INT32, self.INT64)
+        return self in (self.INT8, self.INT16, self.INT32, self.INT64)
 
     def isfloat(self):
         return self in (self.FLOAT32, self.FLOAT64)
@@ -178,7 +179,9 @@ class NativeFunction(eve.StrEnum):
     CEIL = "ceil"
     TRUNC = "trunc"
 
-    IR_OP_TO_NUM_ARGS: ClassVar[Dict[NativeFunction, int]]
+    INT = "int"
+
+    IR_OP_TO_NUM_ARGS: ClassVar[Dict["NativeFunction", int]]
 
     @property
     def arity(self) -> int:
@@ -217,6 +220,7 @@ NativeFunction.IR_OP_TO_NUM_ARGS = {
         NativeFunction.FLOOR: 1,
         NativeFunction.CEIL: 1,
         NativeFunction.TRUNC: 1,
+        NativeFunction.INT: 1,
     }.items()
 }
 
@@ -334,6 +338,31 @@ class VariableKOffset(eve.GenericNode, Generic[ExprT]):
             raise ValueError("Variable vertical index must be an integer expression")
 
 
+class AbsoluteKIndex(eve.GenericNode, Generic[ExprT]):
+    """Access a field with absolute K
+
+    Restrictions:
+    - Centered I/J
+    - No data dimensions
+    - Read-only
+    """
+
+    k: Union[int, ExprT]
+
+    def to_dict(self) -> Dict[str, Optional[int]]:
+        return {"i": 0, "j": 0, "k": None}
+
+    @datamodels.validator("k")
+    def offset_expr_is_int(self, attribute: datamodels.Attribute, value: Any) -> None:
+        if isinstance(value, numbers.Real):
+            if not isinstance(value, int):
+                raise ValueError("Absolute vertical index literal must be an integer")
+        else:
+            value = typing.cast(Expr, value)
+            if value.dtype is not DataType.AUTO and not value.dtype.isinteger():
+                raise ValueError("Absolute vertical index must be an integer expression")
+
+
 class ScalarAccess(LocNode):
     name: eve.Coerced[eve.SymbolRef]
     kind: ExprKind = ExprKind.SCALAR
@@ -341,7 +370,7 @@ class ScalarAccess(LocNode):
 
 class FieldAccess(eve.GenericNode, Generic[ExprT, VariableKOffsetT]):
     name: eve.Coerced[eve.SymbolRef]
-    offset: Union[CartesianOffset, VariableKOffsetT]
+    offset: Union[CartesianOffset, VariableKOffsetT, AbsoluteKIndex]
     data_index: List[ExprT] = eve.field(default_factory=list)
     kind: ExprKind = ExprKind.FIELD
 
@@ -554,6 +583,8 @@ def native_func_call_dtype_propagation(*, strict: bool = True) -> datamodels.Roo
     def _impl(cls: Type[NativeFuncCall], instance: NativeFuncCall) -> None:
         if instance.func in (NativeFunction.ISFINITE, NativeFunction.ISINF, NativeFunction.ISNAN):
             instance.dtype = DataType.BOOL  # type: ignore[attr-defined]
+        elif instance.func in (NativeFunction.INT):
+            instance.dtype = DataType.INT32
         else:
             # assumes all NativeFunction args have a common dtype
             common_dtype = verify_and_get_common_dtype(cls, instance.args, strict=strict)
@@ -890,6 +921,7 @@ OP_TO_UFUNC_NAME: Final[
         NativeFunction.FLOOR: "floor",
         NativeFunction.CEIL: "ceil",
         NativeFunction.TRUNC: "trunc",
+        NativeFunction.INT: "int",
     },
 }
 
