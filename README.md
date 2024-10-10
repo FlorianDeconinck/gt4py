@@ -5,7 +5,7 @@ Here be :dragon:
 Features/fixex in development present in the branch:
 
 - [Feature] cast to `int` in stencils (e.g. `a = int(b)`): <https://github.com/FlorianDeconinck/gt4py/tree/cartesian/cast_to_int>
-- [Feature] `debug` backend - iteartive pure python backend <https://github.com/twicki/gt4py/tree/better_name>
+- [Feature] `debug` backend - iterative pure python backend <https://github.com/FlorianDeconinck/gt4py/tree/cartesian/feature/debug_backend>
 - [Feature] Absolute K indexing via `field.at(K=...)]` for `numpy` and `dace:X` <https://github.com/FlorianDeconinck/gt4py/tree/cartesian/feature/absolute_k_indexation>
 
 We now resume your regurlarly schedule gt4py README.
