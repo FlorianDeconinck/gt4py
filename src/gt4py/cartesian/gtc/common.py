@@ -179,6 +179,8 @@ class NativeFunction(eve.StrEnum):
     CEIL = "ceil"
     TRUNC = "trunc"
     ROUND = "round"
+    ERF = "erf"
+    ERFC = "erfc"
 
     I32 = "i32"
     I64 = "i64"
@@ -225,6 +227,8 @@ NativeFunction.IR_OP_TO_NUM_ARGS = {
         NativeFunction.CEIL: 1,
         NativeFunction.TRUNC: 1,
         NativeFunction.ROUND: 1,
+        NativeFunction.ERF: 1,
+        NativeFunction.ERFC: 1,
         NativeFunction.I32: 1,
         NativeFunction.I64: 1,
         NativeFunction.F32: 1,
@@ -941,6 +945,8 @@ OP_TO_UFUNC_NAME: Final[
         NativeFunction.CEIL: "ceil",
         NativeFunction.TRUNC: "trunc",
         NativeFunction.ROUND: "round",
+        NativeFunction.ERFC: "erfc",
+        NativeFunction.ERF: "erf",
         NativeFunction.I32: "i32",
         NativeFunction.I64: "i64",
         NativeFunction.F32: "f32",
