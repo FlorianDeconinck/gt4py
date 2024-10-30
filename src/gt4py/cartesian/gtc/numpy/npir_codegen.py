@@ -187,11 +187,36 @@ class NpirCodegen(codegen.TemplatedGenerator, eve.VisitorWithSymbolTableTrait):
             )
 
         args = _make_slice_access(offsets, kwargs["is_serial"], kwargs.get("horizontal_mask"))
-        data_index = self.visit(node.data_index, inside_slice=True, **kwargs)
+        data_index = self.visit(
+            node.data_index,
+            inside_slice=kwargs.pop("inside_slice", True),
+            **kwargs,
+        )
+        if len(node.data_index) == 1 and isinstance(node.data_index[0], npir.FieldSlice):
+            # Of the form:
+            #  > np.take_along_axis(
+            #  >    INPUT_FIELD.field_view[i:I,j:J,k:K],
+            #  >    DATA_INDEX_FIELD.field_view[i:I,j:J,k:K,None],
+            #  >    axis=-1
+            #  > ).squeeze(-1)
+            #
+            # ISSUES: - this bypass the shim_key which squeeze the dimensionality out
+            #         and make `None` fail
+            #         - this only works for 4D (I think)
+            # EXPLAINER: we take along the last axis (4D) the data by reading in the data_index
+            #            expressed as a FieldSlice (broadcasting), this give us the good data
+            #            but with an extra argument we squeeze out
+            access_slice = ", ".join(args)
+            field_access_str = "np.take_along_axis("
+            field_access_str += f"{node.name}.field_view[{access_slice}], "
+            field_access_str += f", {data_index[0][:-1]}, None], "
+            field_access_str = +", axis=-1)"
+            field_access_str = +".squeeze(-1)"
+        else:
+            access_slice = ", ".join(args + list(data_index))
+            field_access_str = f"{node.name}[{access_slice}]"
 
-        access_slice = ", ".join(args + list(data_index))
-
-        return f"{node.name}[{access_slice}]"
+        return field_access_str
 
     def visit_LocalScalarAccess(
         self,
