@@ -210,8 +210,8 @@ class NpirCodegen(codegen.TemplatedGenerator, eve.VisitorWithSymbolTableTrait):
             field_access_str = "np.take_along_axis("
             field_access_str += f"{node.name}.field_view[{access_slice}], "
             field_access_str += f", {data_index[0][:-1]}, None], "
-            field_access_str = +", axis=-1)"
-            field_access_str = +".squeeze(-1)"
+            field_access_str += ", axis=-1)"
+            field_access_str += ".squeeze(-1)"
         else:
             access_slice = ", ".join(args + list(data_index))
             field_access_str = f"{node.name}[{access_slice}]"
