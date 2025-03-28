@@ -4,10 +4,11 @@ on:
   push:
     branches:
     - main
+    - physics
   pull_request:
     branches:
     - main
-
+    - physics
 jobs:
   code-quality:
     runs-on: ubuntu-latest

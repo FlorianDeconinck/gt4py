@@ -4,9 +4,11 @@ on:
   push:
     branches:
     - main
+    - physics
   pull_request:
     branches:
     - main
+    - physics
     paths-ignore:  # Skip when only gt4py.next or doc files have been updated
     - "src/gt4py/next/**"
     - "tests/next_tests/**"

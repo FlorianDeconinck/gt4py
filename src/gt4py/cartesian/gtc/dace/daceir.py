@@ -741,13 +741,32 @@ class VariableKOffset(common.VariableKOffset[Expr]):
                 )
 
 
-class IndexAccess(common.FieldAccess, Expr):
-    # ScalarAccess used for indirect addressing
-    offset: Optional[common.CartesianOffset | Literal | ScalarAccess | VariableKOffset]
-    is_target: bool
+class AbsoluteKIndex(common.AbsoluteKIndex[Expr]):
+    pass
 
-    explicit_indices: Optional[list[Literal | ScalarAccess | VariableKOffset]] = None
-    """Used to access as a full field with explicit indices"""
+
+class IndexAccess(common.FieldAccess, Expr):
+    offset: Optional[
+        Union[
+            common.CartesianOffset,
+            VariableKOffset,
+            AbsoluteKIndex,
+            Literal,
+            ScalarAccess,  # For field index
+        ]
+    ]
+    is_target: bool
+    # Use to access as a full field w/ explicit indices
+    explicit_indices: Optional[
+        List[Union[VariableKOffset, AbsoluteKIndex, Literal, ScalarAccess]]
+    ] = None
+
+    @datamodels.validator("offset")
+    def offset_is_integer(self, attribute: datamodels.Attribute, v: Expr) -> None:
+        if (isinstance(v, ScalarAccess) or isinstance(v, Literal)) and not v.dtype.isinteger():
+            raise ValueError(
+                f"Index access, when ScalarAcces/Literal, must be an integer, got {v.dtype}."
+            )
 
 
 class AssignStmt(common.AssignStmt[Union[IndexAccess, ScalarAccess], Expr], Stmt):

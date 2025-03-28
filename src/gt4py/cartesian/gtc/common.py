@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import enum
 import functools
+import numbers
 import typing
 from typing import (
     Any,
@@ -177,6 +178,14 @@ class NativeFunction(eve.StrEnum):
     FLOOR = "floor"
     CEIL = "ceil"
     TRUNC = "trunc"
+    ROUND = "round"
+    ERF = "erf"
+    ERFC = "erfc"
+
+    I32 = "i32"
+    I64 = "i64"
+    F32 = "f32"
+    F64 = "f64"
 
     IR_OP_TO_NUM_ARGS: ClassVar[Dict[NativeFunction, int]]
 
@@ -217,6 +226,13 @@ NativeFunction.IR_OP_TO_NUM_ARGS = {
         NativeFunction.FLOOR: 1,
         NativeFunction.CEIL: 1,
         NativeFunction.TRUNC: 1,
+        NativeFunction.ROUND: 1,
+        NativeFunction.ERF: 1,
+        NativeFunction.ERFC: 1,
+        NativeFunction.I32: 1,
+        NativeFunction.I64: 1,
+        NativeFunction.F32: 1,
+        NativeFunction.F64: 1,
     }.items()
 }
 
@@ -317,6 +333,18 @@ class CartesianOffset(eve.Node):
     def to_dict(self) -> Dict[str, int]:
         return {"i": self.i, "j": self.j, "k": self.k}
 
+    def to_str(self, dimensions: tuple[bool, bool, bool]) -> str:
+        dimension_strings = []
+
+        if dimensions[0]:
+            dimension_strings.append(f"i + {self.i}")
+        if dimensions[1]:
+            dimension_strings.append(f"j + {self.j}")
+        if dimensions[2]:
+            dimension_strings.append(f"k + {self.k}")
+
+        return ",".join(dimension_strings)
+
 
 class VariableKOffset(eve.GenericNode, Generic[ExprT]):
     k: ExprT
@@ -331,6 +359,31 @@ class VariableKOffset(eve.GenericNode, Generic[ExprT]):
             raise ValueError("Variable vertical index must be an integer expression")
 
 
+class AbsoluteKIndex(eve.GenericNode, Generic[ExprT]):
+    """Access a field with absolute K
+
+    Restrictions:
+    - Centered I/J
+    - No data dimensions
+    - Read-only
+    """
+
+    k: Union[int, ExprT]
+
+    def to_dict(self) -> Dict[str, Optional[int]]:
+        return {"i": 0, "j": 0, "k": None}
+
+    @datamodels.validator("k")
+    def offset_expr_is_int(self, attribute: datamodels.Attribute, value: Any) -> None:
+        if isinstance(value, numbers.Real):
+            if not isinstance(value, int):
+                raise ValueError("Absolute vertical index literal must be an integer")
+        else:
+            value = typing.cast(Expr, value)
+            if value.dtype is not DataType.AUTO and not value.dtype.isinteger():
+                raise ValueError("Absolute vertical index must be an integer expression")
+
+
 class ScalarAccess(LocNode):
     name: eve.Coerced[eve.SymbolRef]
     kind: ExprKind = ExprKind.SCALAR
@@ -338,7 +391,7 @@ class ScalarAccess(LocNode):
 
 class FieldAccess(eve.GenericNode, Generic[ExprT, VariableKOffsetT]):
     name: eve.Coerced[eve.SymbolRef]
-    offset: Union[CartesianOffset, VariableKOffsetT]
+    offset: Union[CartesianOffset, VariableKOffsetT, AbsoluteKIndex]
     data_index: List[ExprT] = eve.field(default_factory=list)
     kind: ExprKind = ExprKind.FIELD
 
@@ -551,6 +604,14 @@ def native_func_call_dtype_propagation(*, strict: bool = True) -> datamodels.Roo
     def _impl(cls: Type[NativeFuncCall], instance: NativeFuncCall) -> None:
         if instance.func in (NativeFunction.ISFINITE, NativeFunction.ISINF, NativeFunction.ISNAN):
             instance.dtype = DataType.BOOL  # type: ignore[attr-defined]
+        elif instance.func in (NativeFunction.I32):
+            instance.dtype = DataType.INT32  # type: ignore[attr-defined]
+        elif instance.func in (NativeFunction.I64):
+            instance.dtype = DataType.INT64  # type: ignore[attr-defined]
+        elif instance.func in (NativeFunction.F32):
+            instance.dtype = DataType.FLOAT32  # type: ignore[attr-defined]
+        elif instance.func in (NativeFunction.F64):
+            instance.dtype = DataType.FLOAT64  # type: ignore[attr-defined]
         else:
             # assumes all NativeFunction args have a common dtype
             common_dtype = verify_and_get_common_dtype(cls, instance.args, strict=strict)
@@ -600,7 +661,12 @@ class _LvalueDimsValidator(eve.VisitorWithSymbolTableTrait):
         self.generic_visit(node, loop_order=loop_order, **kwargs)
 
     def visit_AssignStmt(
-        self, node: AssignStmt, *, loop_order: LoopOrder, symtable: Dict[str, Any], **kwargs: Any
+        self,
+        node: AssignStmt,
+        *,
+        loop_order: LoopOrder,
+        symtable: Dict[str, Any],
+        **kwargs: Any,
     ) -> None:
         decl = symtable.get(node.left.name, None)
         if decl is None:
@@ -887,6 +953,13 @@ OP_TO_UFUNC_NAME: Final[
         NativeFunction.FLOOR: "floor",
         NativeFunction.CEIL: "ceil",
         NativeFunction.TRUNC: "trunc",
+        NativeFunction.ROUND: "round",
+        NativeFunction.ERFC: "erfc",
+        NativeFunction.ERF: "erf",
+        NativeFunction.I32: "i32",
+        NativeFunction.I64: "i64",
+        NativeFunction.F32: "f32",
+        NativeFunction.F64: "f64",
     },
 }
 

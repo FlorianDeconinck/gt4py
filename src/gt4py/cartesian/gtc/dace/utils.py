@@ -18,7 +18,7 @@ import numpy as np
 
 from gt4py import eve
 from gt4py.cartesian.gtc import common, oir
-from gt4py.cartesian.gtc.common import CartesianOffset, VariableKOffset
+from gt4py.cartesian.gtc.common import AbsoluteKIndex, CartesianOffset, VariableKOffset
 from gt4py.cartesian.gtc.dace import daceir as dcir, prefix
 from gt4py.cartesian.gtc.passes.oir_optimizations.utils import compute_horizontal_block_extents
 
@@ -69,7 +69,7 @@ def replace_strides(arrays: List[dace.data.Array], get_layout_map) -> Dict[str, 
 def get_tasklet_symbol(
     name: str,
     *,
-    offset: Optional[CartesianOffset | VariableKOffset] = None,
+    offset: Optional[CartesianOffset | VariableKOffset | AbsoluteKIndex] = None,
     is_target: bool,
 ):
     access_name = f"{prefix.TASKLET_OUT}{name}" if is_target else f"{prefix.TASKLET_IN}{name}"
@@ -237,7 +237,7 @@ class AccessInfoCollector(eve.NodeVisitor):
 
     def _make_access_info(
         self,
-        offset_node: Union[CartesianOffset, oir.VariableKOffset],
+        offset_node: Union[CartesianOffset, oir.VariableKOffset, AbsoluteKIndex],
         axes,
         is_conditional,
         region,
@@ -245,6 +245,8 @@ class AccessInfoCollector(eve.NodeVisitor):
         grid_subset,
         is_write,
     ) -> dcir.FieldAccessInfo:
+        """Compute how the field get accessed on the grid"""
+
         # Check we have expression offsets in K
         offset = [offset_node.to_dict()[k] for k in "ijk"]
         variable_offset_axes = [dcir.Axis.K] if isinstance(offset_node, oir.VariableKOffset) else []

@@ -21,6 +21,7 @@ from typing import Any, Dict, Final, List, Literal, Optional, Sequence, Set, Tup
 import numpy as np
 
 from gt4py.cartesian import definitions as gt_definitions, gtscript, utils as gt_utils
+from gt4py.cartesian.config import build_settings
 from gt4py.cartesian.frontend import node_util, nodes
 from gt4py.cartesian.frontend.defir_to_gtir import DefIRToGTIR, UnrollVectorAssignments
 from gt4py.cartesian.gtc import utils as gtc_utils
@@ -309,11 +310,15 @@ class ValueInliner(ast.NodeTransformer):
 
 class ReturnReplacer(gt_utils.meta.ASTTransformPass):
     @classmethod
-    def apply(cls, ast_object: ast.AST, target_node: ast.AST) -> None:
+    def apply(cls, ast_object: ast.AST, target_node: Optional[ast.AST]) -> None:
         """Ensure that there is only a single return statement (can still return a tuple)."""
         ret_count = sum(isinstance(node, ast.Return) for node in ast.walk(ast_object))
-        if ret_count != 1:
-            raise GTScriptSyntaxError("GTScript Functions should have a single return statement")
+        if ret_count > 1:
+            raise GTScriptSyntaxError("GTScript Functions cannot have multiple return statements")
+        elif ret_count == 0 and target_node is not None:
+            raise GTScriptSyntaxError(
+                "Attempting to assign the return value of a GTScript function that does not return anything."
+            )
         cls().visit(ast_object, target_node=target_node)
 
     @staticmethod
@@ -335,6 +340,10 @@ class ReturnReplacer(gt_utils.meta.ASTTransformPass):
             raise GTScriptSyntaxError(
                 "Number of returns values does not match arguments on left side"
             )
+
+
+def _filter_absolute_K_index_method(node: ast.Call) -> bool:
+    return isinstance(node.func, ast.Attribute) and node.func.attr == "at"
 
 
 class CallInliner(ast.NodeTransformer):
@@ -403,19 +412,33 @@ class CallInliner(ast.NodeTransformer):
         return node
 
     def visit_Assign(self, node: ast.Assign):
-        if (
-            isinstance(node.value, ast.Call)
-            and gt_meta.get_qualified_name_from_node(node.value.func) not in gtscript.MATH_BUILTINS
-        ):
-            assert len(node.targets) == 1
-            self.visit(node.value, target_node=node.targets[0])
-            # This node can be now removed since the trivial assignment has been already done
-            # in the Call visitor
-            return None
+        if isinstance(node.value, ast.Call):
+            if _filter_absolute_K_index_method(node.value):
+                return node
+            elif gt_meta.get_qualified_name_from_node(
+                node.value.func
+            ) not in gtscript.MATH_BUILTINS.union(
+                gtscript.TYPE_HINT_AND_CAST_BUILTINS.union(gtscript.REDUCTION_BUILTINS)
+            ):
+                assert len(node.targets) == 1
+                self.visit(node.value, target_node=node.targets[0])
+                # This node can be now removed since the trivial assignment has been already done
+                # in the Call visitor
+                return None
+            else:
+                return self.generic_visit(node)
         else:
             return self.generic_visit(node)
 
+    def _get_sliced_symbol(self, node):
+        if isinstance(node, ast.Name):
+            return node.id
+        elif isinstance(node, ast.Subscript):
+            return self._get_sliced_symbol(node.value)
+
     def visit_Call(self, node: ast.Call, *, target_node=None):  # Cyclomatic complexity too high
+        if _filter_absolute_K_index_method(node):
+            return node
         call_name = gt_meta.get_qualified_name_from_node(node.func)
 
         if call_name in self.call_stack:
@@ -431,15 +454,8 @@ class CallInliner(ast.NodeTransformer):
         elif call_name not in self.context or not hasattr(self.context[call_name], "_gtscript_"):
             raise GTScriptSyntaxError("Unknown call", loc=nodes.Location.from_ast_node(node))
 
-        # Recursively inline any possible nested subroutine call
-        call_info = self.context[call_name]._gtscript_
-        call_ast = copy.deepcopy(call_info["ast"])
-        self.current_name = call_name
-        CallInliner.apply(
-            call_ast, call_info["local_context"], call_stack={*self.call_stack, call_name}
-        )
-
         # Extract call arguments
+        call_info = self.context[call_name]._gtscript_
         call_signature = call_info["api_signature"]
         arg_infos = {arg.name: arg.default for arg in call_signature}
         try:
@@ -463,6 +479,21 @@ class CallInliner(ast.NodeTransformer):
                 loc=nodes.Location.from_ast_node(node),
             ) from ex
 
+        # Inline constant arguments
+        call_ast = copy.deepcopy(call_info["ast"])
+        local_context = {
+            name: arg_node.value
+            for name, arg_node in call_args.items()
+            if isinstance(arg_node, ast.Constant)
+        }
+        ValueInliner.apply(call_ast, local_context)
+
+        # Recursively inline any possible nested subroutine call
+        self.current_name = call_name
+        CallInliner.apply(
+            call_ast, call_info["local_context"], call_stack={*self.call_stack, call_name}
+        )
+
         # Rename local names in subroutine to avoid conflicts with caller context names
         try:
             assign_targets = gt_meta.collect_assign_targets(call_ast, allow_multiple_targets=False)
@@ -473,10 +504,15 @@ class CallInliner(ast.NodeTransformer):
 
         assigned_symbols = set()
         for target in assign_targets:
-            if not isinstance(target, ast.Name):
-                raise GTScriptSyntaxError(message="Unsupported assignment target.", loc=target)
+            if isinstance(target, ast.Subscript):
+                sliced_symbol = self._get_sliced_symbol(target)
+                if sliced_symbol not in call_args:
+                    raise GTScriptSyntaxError(message="Unsupported assignment target.", loc=target)
+            else:
+                if not isinstance(target, ast.Name):
+                    raise GTScriptSyntaxError(message="Unsupported assignment target.", loc=target)
 
-            assigned_symbols.add(target.id)
+                assigned_symbols.add(target.id)
 
         name_mapping = {
             name: value.id
@@ -494,32 +530,32 @@ class CallInliner(ast.NodeTransformer):
 
         # Replace returns by assignments in subroutine
         if target_node is None:
-            if any(
-                isinstance(nd.value, ast.Tuple)
-                for nd in ast.walk(call_ast)
-                if isinstance(nd, ast.Return)
-            ):
+            return_nodes = [nd for nd in ast.walk(call_ast) if isinstance(nd, ast.Return)]
+            if any(isinstance(nd.value, ast.Tuple) for nd in return_nodes):
                 raise GTScriptSyntaxError(
                     "Only functions with a single return value can be used in expressions, including as call arguments. "
                     "Please assign the function results to symbols first."
                 )
-            target_node = ast.Name(
-                ctx=ast.Store(),
-                lineno=node.lineno,
-                col_offset=node.col_offset,
-                id=template_fmt.format(name="RETURN_VALUE"),
-            )
 
-        assert isinstance(target_node, (ast.Name, ast.Tuple, ast.Subscript)) and isinstance(
-            target_node.ctx, ast.Store
+            if len(return_nodes) > 0:
+                target_node = ast.Name(
+                    ctx=ast.Store(),
+                    lineno=node.lineno,
+                    col_offset=node.col_offset,
+                    id=template_fmt.format(name="RETURN_VALUE"),
+                )
+
+        assert target_node is None or (
+            isinstance(target_node, (ast.Name, ast.Tuple, ast.Subscript))
+            and isinstance(target_node.ctx, ast.Store)
         )
-
         ReturnReplacer.apply(call_ast, target_node)
 
         # Add subroutine sources prepending the required arg assignments
         inlined_stmts = []
         for arg_name, arg_value in call_args.items():
-            if arg_name not in name_mapping:
+            # note(stubbiali): filter out constant arguments (which have been previously inlined)
+            if arg_name not in name_mapping and not isinstance(arg_value, ast.Constant):
                 inlined_stmts.append(
                     ast.Assign(
                         lineno=node.lineno,
@@ -553,7 +589,7 @@ class CallInliner(ast.NodeTransformer):
                 col_offset=target_node.col_offset,
                 elts=target_node.elts,
             )
-        else:
+        elif isinstance(target_node, ast.Subscript):
             result_node = ast.Subscript(
                 ctx=ast.Load(),
                 lineno=target_node.lineno,
@@ -561,6 +597,8 @@ class CallInliner(ast.NodeTransformer):
                 value=target_node.value,
                 slice=target_node.slice,
             )
+        else:  # target_node is None
+            result_node = call_ast.body[0]
 
         # Add the temp_annotations and temp_init_values to the parent
         current_info = self.context[self.current_name]._gtscript_
@@ -575,8 +613,15 @@ class CallInliner(ast.NodeTransformer):
         return result_node
 
     def visit_Expr(self, node: ast.Expr):
-        """Ignore pure string statements in callee."""
-        if not isinstance(node.value, (ast.Constant, ast.Str)):
+        if (
+            isinstance(node.value, ast.Call)
+            and gt_meta.get_qualified_name_from_node(node.value.func) not in gtscript.MATH_BUILTINS
+        ):
+            # Inline a function with no return value and then remove the current node
+            self.visit(node.value, target_node=None)
+            return None
+        elif not isinstance(node.value, (ast.Constant, ast.Str)):
+            # Ignore ure string statements in callee
             return super().visit(node.value)
 
 
@@ -612,6 +657,138 @@ class CompiledIfInliner(ast.NodeTransformer):
                 )
 
         return node if node else None
+
+
+class LoopIndexReplacer(ast.NodeTransformer):
+    def __init__(self, name: str, value: int) -> None:
+        self.name = name
+        self.value = value
+
+    def visit_Name(self, node: ast.Name) -> Union[ast.Constant, ast.Name]:
+        if node.id == self.name:
+            return ast.Constant(self.value, ctx=node.ctx)
+        else:
+            return node
+
+
+def _get_loop_index_values(
+    node: Union[ast.Call, ast.List, ast.Tuple], context: dict
+) -> Optional[Union[list, range]]:
+    if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "range":
+        range_args = [eval(ast.unparse(arg), context) for arg in node.args]
+        assert 1 <= len(range_args) <= 3
+        if len(range_args) == 1:
+            start, stop, step = 0, *range_args, 1
+        elif len(range_args) == 2:
+            start, stop, step = *range_args, 1
+        else:
+            start, stop, step = range_args
+        index_values = range(start, stop, step)
+    elif isinstance(node, (ast.List, ast.Tuple)):
+        index_values = [eval(ast.unparse(elt), context) for elt in node.elts]
+    else:
+        index_values = None
+    return index_values
+
+
+class ReductionUnroller(ast.NodeTransformer):
+    REDUCTION_OP_TO_AST_OP = {"add": ast.Add}
+
+    @classmethod
+    def apply(cls, func_node: ast.FunctionDef, context: dict):
+        unroller = cls(context)
+        unroller(func_node)
+
+    def __init__(self, context: dict) -> None:
+        self.context = context
+
+    def __call__(self, func_node: ast.FunctionDef) -> None:
+        self.visit(func_node)
+
+    def visit_Call(self, node: ast.Call) -> Union[ast.Call, ast.BinOp]:
+        if isinstance(node.func, ast.Name) and node.func.id == "reduce":
+            return self._unroll_reduction(node)
+        else:
+            return node
+
+    def _unroll_reduction(self, node: ast.Call) -> ast.BinOp:
+        param_names = ["op", "generator", "initial"][len(args := node.args) :]
+        for kwarg in node.keywords:
+            if kwarg.arg in param_names:
+                args.append(kwarg.value)
+            else:
+                raise GTScriptSyntaxError(f"Reduce: unknown argument `{kwarg.arg}`.")
+
+        if not 2 <= len(args) <= 3:
+            raise GTScriptSyntaxError("Reduce: the function takes 2 to 3 arguments.")
+
+        if isinstance(args[0], ast.Name) and (op_id := args[0].id) in self.REDUCTION_OP_TO_AST_OP:
+            op = self.REDUCTION_OP_TO_AST_OP[op_id]()
+        else:
+            raise GTScriptSyntaxError("Reduce: invalid reduction operator.")
+
+        if isinstance((generator_expr := args[1]), ast.GeneratorExp):
+            template_item = generator_expr.elt
+            index_name = generator_expr.generators[0].target.id
+            index_values = list(
+                _get_loop_index_values(generator_expr.generators[0].iter, self.context)
+            )
+        else:
+            raise GTScriptSyntaxError("Reduce: second argument should be a generator expression.")
+
+        initial_value = args[2] if len(node.args) == 3 else None
+
+        return self._get_binary_node(
+            op, template_item, index_name, index_values, left=initial_value
+        )
+
+    def _get_binary_node(self, op, template_item, index_name, index_values, left=None) -> ast.BinOp:
+        if left is None:
+            assert len(index_values) > 1
+            left = LoopIndexReplacer(index_name, index_values[0]).visit(
+                copy.deepcopy(template_item)
+            )
+            index_values = index_values[1:]
+
+        assert len(index_values) > 0
+        if len(index_values) == 1:
+            right = LoopIndexReplacer(index_name, index_values[0]).visit(template_item)
+        else:
+            right = self._get_binary_node(op, template_item, index_name, index_values)
+
+        return ast.BinOp(left=left, op=op, right=right)
+
+
+class DataDimLoopUnroller(ast.NodeTransformer):
+    @classmethod
+    def apply(cls, func_node: ast.FunctionDef, context: dict):
+        unroller = cls(context)
+        unroller(func_node)
+
+    def __init__(self, context):
+        self.context = context
+        self.prefix = ""
+
+    def __call__(self, func_node: ast.FunctionDef) -> None:
+        self.visit(func_node)
+
+    def visit_For(self, node: ast.For) -> Union[ast.For, list[ast.AST]]:
+        super().generic_visit(node)
+
+        if (index_values := _get_loop_index_values(node.iter, self.context)) is not None:
+            assert isinstance(node.target, ast.Name)
+            index_name = node.target.id
+
+            new_body = []
+            for index_value in index_values:
+                body = copy.deepcopy(node.body)
+                transformer = LoopIndexReplacer(index_name, index_value)
+                new_body_item = [transformer.visit(stmt) for stmt in body]
+                new_body += new_body_item
+
+            return new_body
+        else:
+            return node
 
 
 def _make_temp_decls(
@@ -695,6 +872,10 @@ def _is_datadims_indexing_name(name: str):
     return name.endswith(f".{_DATADIMS_INDEXER}")
 
 
+def _is_iterator_access(name: str) -> bool:
+    return name == "THIS_K"
+
+
 def _trim_indexing_symbol(name: str):
     return name[: -1 * (len(_DATADIMS_INDEXER) + 1)]
 
@@ -768,6 +949,13 @@ class IRMaker(ast.NodeVisitor):
             "floor": nodes.NativeFunction.FLOOR,
             "ceil": nodes.NativeFunction.CEIL,
             "trunc": nodes.NativeFunction.TRUNC,
+            "round": nodes.NativeFunction.ROUND,
+            "erf": nodes.NativeFunction.ERF,
+            "erfc": nodes.NativeFunction.ERFC,
+            "i32": nodes.NativeFunction.I32,
+            "i64": nodes.NativeFunction.I64,
+            "f32": nodes.NativeFunction.F32,
+            "f64": nodes.NativeFunction.F64,
         }
 
     def __call__(self, ast_root: ast.AST):
@@ -1013,11 +1201,20 @@ class IRMaker(ast.NodeVisitor):
                 loc=nodes.Location.from_ast_node(node),
             )
         elif isinstance(value, numbers.Number):
-            value_type = (
-                self.dtypes[type(value)]
-                if self.dtypes and type(value) in self.dtypes.keys()
-                else np.dtype(type(value))
-            )
+            if self.dtypes and type(value) in self.dtypes.keys():
+                value_type = self.dtypes[type(value)]
+            else:
+                if build_settings["literal_floating_point_precision"] is not None:
+                    if isinstance(value, int):
+                        value_type = np.dtype(
+                            f"i{int(int(build_settings['literal_floating_point_precision']) / 8)}"
+                        )
+                    else:
+                        value_type = np.dtype(
+                            f"f{int(int(build_settings['literal_floating_point_precision']) / 8)}"
+                        )
+                else:
+                    value_type = np.dtype(type(value))
             data_type = nodes.DataType.from_dtype(value_type)
             return nodes.ScalarLiteral(value=value, data_type=data_type)
         else:
@@ -1057,6 +1254,8 @@ class IRMaker(ast.NodeVisitor):
             result = nodes.FieldRef.datadims_index(
                 name=_trim_indexing_symbol(symbol), loc=nodes.Location.from_ast_node(node)
             )
+        elif _is_iterator_access(symbol):
+            return nodes.IteratorAccess()
         else:
             raise AssertionError(f"Missing '{symbol}' symbol definition")
 
@@ -1112,7 +1311,7 @@ class IRMaker(ast.NodeVisitor):
 
     def _eval_index(
         self, node: ast.Subscript, field_axes: Optional[Set[Literal["I", "J", "K"]]] = None
-    ) -> Optional[List[int]]:
+    ) -> Optional[Union[List[int], nodes.AbsoluteKIndex]]:
         tuple_or_expr = node.slice.value if isinstance(node.slice, ast.Index) else node.slice
         index_nodes = gtc_utils.listify(
             tuple_or_expr.elts if isinstance(tuple_or_expr, ast.Tuple) else tuple_or_expr
@@ -1161,16 +1360,18 @@ class IRMaker(ast.NodeVisitor):
             assert index is not None
             result.index = index[0]
         else:
-            if isinstance(node.value, ast.Name):
+            if isinstance(index, nodes.AbsoluteKIndex):
+                result.offset = index
+            elif isinstance(node.value, ast.Name):
                 field_axes = self.fields[result.name].axes
                 if index is not None:
                     if len(field_axes) != len(index):
                         ro_field_message = ""
                         if len(field_axes) == 0:
-                            ro_field_message = f"Did you mean .A{index}?"
+                            ro_field_message = f"Did you mean absolute indexing via .A{index}?"
                         raise GTScriptSyntaxError(
-                            f"Incorrect offset specification detected. Found {index}, "
-                            f"but the field has dimensions ({', '.join(field_axes)}). "
+                            f"Incorrect offset specification detected for {result.name}. "
+                            f"Found index={index}, but {result.name} field has dimensions ({', '.join(field_axes)}). "
                             f"{ro_field_message}"
                         )
                     result.offset = {axis: value for axis, value in zip(field_axes, index)}
@@ -1378,7 +1579,52 @@ class IRMaker(ast.NodeVisitor):
 
         return result
 
+    def _absolute_K_index_method(self, node: ast.Call):
+        # Dev note: we enforce .at(K=..., ddim=[...]) for the POC
+        #           A better version of this code would look through the keywords
+        #           in any order. `ddim` shall remain optional, K mandatory.
+        assert _filter_absolute_K_index_method(node)
+        if len(node.keywords) not in [1, 2]:
+            raise GTScriptSyntaxError(
+                message="Absolute K index bad syntax. Must be of the form`.at(K=..., ddim=[...])` "
+                " with the `ddim` argument optional",
+                loc=nodes.Location.from_ast_node(node),
+            )
+        if node.keywords[0].arg != "K":
+            raise GTScriptSyntaxError(
+                message="Absolute K index: bad syntax, first argument must be `K`. "
+                "Must be of the form`.at(K=...)`",
+                loc=nodes.Location.from_ast_node(node),
+            )
+        if len(node.keywords) > 1 and node.keywords[1].arg != "ddim":
+            raise GTScriptSyntaxError(
+                message="Absolute K index: bad syntax, second argument (optional) must be `ddim`. "
+                "Must be of the form`.at(K=..., ddim=[...])`",
+                loc=nodes.Location.from_ast_node(node),
+            )
+        if (
+            len(node.keywords) > 1
+            and node.keywords[1].arg == "ddim"
+            and not isinstance(node.keywords[1].value, ast.List)
+        ):
+            raise GTScriptSyntaxError(
+                message="Absolute K index: bad syntax, second argument `ddim` (optional) must be "
+                "a list of values. Must be of the form`.at(K=..., ddim=[...])`",
+                loc=nodes.Location.from_ast_node(node),
+            )
+        field: nodes.FieldRef = self.visit(node.func.value)
+        assert isinstance(field, nodes.FieldRef)
+        field.offset = nodes.AbsoluteKIndex(k=self.visit(node.keywords[0].value))
+        if len(node.keywords) == 2:
+            field.data_index = [self.visit(value) for value in node.keywords[1].value.elts]
+        return field
+
     def visit_Call(self, node: ast.Call):
+        # We check for am absolute Field index in K
+        if _filter_absolute_K_index_method(node):
+            return self._absolute_K_index_method(node)
+
+        # We expect the Call is a native function to carry forward
         native_fcn = nodes.NativeFunction.PYTHON_SYMBOL_TO_IR_OP[node.func.id]
 
         args = [self.visit(arg) for arg in node.args]
@@ -1425,23 +1671,39 @@ class IRMaker(ast.NodeVisitor):
 
         return name, spatial_offset, data_index
 
-    def visit_Assign(self, node: ast.Assign) -> list:
+    def visit_AnnAssign(self, node: ast.AnnAssign) -> list:
+        return self._resolve_assign(node, [node.target], target_annotation=node.annotation)
+
+    def visit_Assign(self, node: ast.Assign, **kwargs) -> list:
+        return self._resolve_assign(node, node.targets)
+
+    def _resolve_assign(
+        self,
+        node: Union[ast.AnnAssign, ast.Assign],
+        targets: List[Any],
+        target_annotation: Optional[Any] = None,
+    ) -> list:
         result = []
 
         # Create decls for temporary fields
         target = []
-        if len(node.targets) > 1:
+        if len(targets) > 1:
             raise GTScriptSyntaxError(
                 message="Assignment to multiple variables (e.g. var1 = var2 = value) not supported.",
                 loc=nodes.Location.from_ast_node(node),
             )
 
-        for t in node.targets[0].elts if isinstance(node.targets[0], ast.Tuple) else node.targets:
+        for t in targets[0].elts if isinstance(targets[0], ast.Tuple) else targets:
             name, spatial_offset, data_index = self._parse_assign_target(t)
             if spatial_offset:
                 if spatial_offset[0] != 0 or spatial_offset[1] != 0:
                     raise GTScriptSyntaxError(
                         message="Assignment to non-zero offsets is not supported in IJ.",
+                        loc=nodes.Location.from_ast_node(t),
+                    )
+                if target_annotation is not None:
+                    raise GTScriptSyntaxError(
+                        message="Cannot annotate a temporary Field with offset write. Define first.",
                         loc=nodes.Location.from_ast_node(t),
                     )
                 # Case of K-offset
@@ -1461,9 +1723,20 @@ class IRMaker(ast.NodeVisitor):
                             message="Temporaries with data dimensions need to be declared explicitly.",
                             loc=nodes.Location.from_ast_node(t),
                         )
+                    dtype = nodes.DataType.AUTO
+                    if target_annotation is not None:
+                        source = gt_meta.ast_unparse(target_annotation)
+                        try:
+                            dtype = eval(source, nodes.DataType.FRONTEND_TO_NATIVE)
+                        except NameError:
+                            raise GTScriptSyntaxError(
+                                message=f"Failed to recognize type {source} for local symbol {name}."
+                                f"Available types are {nodes.DataType.FRONTEND_TO_NATIVE.keys()}",
+                                loc=nodes.Location.from_ast_node(t),
+                            ) from None
                     field_decl = nodes.FieldDecl(
                         name=name,
-                        data_type=nodes.DataType.AUTO,
+                        data_type=dtype,
                         axes=nodes.Domain.LatLonGrid().axes_names,
                         is_api=False,
                         loc=nodes.Location.from_ast_node(t),
@@ -1758,6 +2031,7 @@ class GTScriptParser(ast.NodeVisitor):
             "JK": gtscript.JK,
             "np": np,
             **(resolved_externals if externals is not None else nonlocal_symbols),
+            **nodes.DataType.FRONTEND_TO_NATIVE,
         }
         ann_assigns = tuple(filter(lambda stmt: isinstance(stmt, ast.AnnAssign), ast_func_def.body))
         for ann_assign in ann_assigns:
@@ -1766,6 +2040,9 @@ class GTScriptParser(ast.NodeVisitor):
 
             source = gt_meta.ast_unparse(ann_assign.annotation)
             descriptor = eval(source, ann_assign_context)
+            # Scalar annotated are dealt with after inlining
+            if descriptor in nodes.DataType.FRONTEND_TO_NATIVE.values():
+                continue
             temp_annotations[name] = descriptor
             if descriptor.axes != gtscript.IJK:
                 axes = "".join(str(ax) for ax in descriptor.axes)
@@ -2048,8 +2325,18 @@ class GTScriptParser(ast.NodeVisitor):
 
         ValueInliner.apply(main_func_node, context=local_context)
 
+        ReductionUnroller.apply(main_func_node, context=local_context)
+
+        # unroll loops over data dimensions
+        # note(stubbiali): address the case of a function called within a for-loop
+        DataDimLoopUnroller.apply(main_func_node, context=local_context)
+
         # Inline function calls
         CallInliner.apply(main_func_node, context=local_context)
+
+        # unroll loops over data dimensions
+        # note(stubbiali): address the case of a for-loop inside a function
+        DataDimLoopUnroller.apply(main_func_node, context=local_context)
 
         # Evaluate and inline compile-time conditionals
         CompiledIfInliner.apply(main_func_node, context=local_context, stencil_name=self.main_name)

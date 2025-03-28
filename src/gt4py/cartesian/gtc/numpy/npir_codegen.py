@@ -43,58 +43,39 @@ def _slice_string(ch: str, offset: int, interval: Tuple[common.AxisBound, common
     )
 
 
-def _make_slice_access(
-    offset: Tuple[Optional[int], Optional[int], Union[str, Optional[int]]],
-    is_serial: bool,
-    interval: Optional[npir.HorizontalMask] = None,
-) -> List[str]:
-    axes: List[str] = []
-
-    if interval is None:
-        interval = npir.HorizontalMask(
-            i=(common.AxisBound.start(0), common.AxisBound.end(0)),
-            j=(common.AxisBound.start(0), common.AxisBound.end(0)),
-        )
-
-    if offset[0] is not None:
-        axes.append(_slice_string("i", offset[0], interval.i))
-    if offset[1] is not None:
-        axes.append(_slice_string("j", offset[1], interval.j))
-
-    if isinstance(offset[2], numbers.Number):
-        bounds = (
-            (common.AxisBound.start(), common.AxisBound.start(offset=1))
-            if is_serial
-            else (common.AxisBound.start(), common.AxisBound.end())
-        )
-        k_str = "k_" if is_serial else "k"
-        axes.append(_slice_string(k_str, offset[2], bounds))
-    elif isinstance(offset[2], str):
-        axes.append(offset[2])
-
-    return axes
-
-
 ORIGIN_CORRECTED_VIEW_CLASS = textwrap.dedent(
     """\
     class Field:
         def __init__(self, field, offsets: Tuple[int, ...], dimensions: Tuple[bool, bool, bool]):
-            ii = iter(range(3))
-            self.idx_to_data = tuple(
-                [next(ii) if has_dim else None for has_dim in dimensions]
-                + list(range(sum(dimensions), len(field.shape)))
-            )
+            self.is_global_table = all(not has_dim for has_dim in dimensions)
+
+            if self.is_global_table:
+                self.idx_to_data = tuple(i for i in range(field.ndim))
+                self.offsets = (0,) * field.ndim
+            else:
+                idx = 0
+                idx_to_data = []
+                for has_dim in dimensions:
+                    if has_dim:
+                        idx_to_data.append(idx)
+                        idx += 1
+                    else:
+                        idx_to_data.append(None)
+                idx_to_data += list(range(idx, field.ndim))
+                self.idx_to_data = tuple(idx_to_data)
+                self.offsets = offsets
 
             shape = [field.shape[i] if i is not None else 1 for i in self.idx_to_data]
             self.field_view = np.reshape(field.data, shape).view(np.ndarray)
-
-            self.offsets = offsets
 
         @classmethod
         def empty(cls, shape, dtype, offset):
             return cls(np.empty(shape, dtype=dtype), offset, (True, True, True))
 
         def shim_key(self, key):
+            if self.is_global_table:
+                return key
+                
             new_args = []
             if not isinstance(key, tuple):
                 key = (key, )
@@ -134,6 +115,7 @@ ORIGIN_CORRECTED_VIEW_CLASS = textwrap.dedent(
             return self.field_view.__getitem__(self.shim_key(key))
 
         def __setitem__(self, key, value):
+            assert not self.is_global_table
             return self.field_view.__setitem__(self.shim_key(key), value)
     """
 )
@@ -148,6 +130,40 @@ class NpirCodegen(codegen.TemplatedGenerator, eve.VisitorWithSymbolTableTrait):
             self.locals_declared |= set(args)
 
     FieldDecl = as_fmt("{name} = Field({name}, _origin_['{name}'], ({', '.join(dimensions)}))")
+
+    def _make_slice_access(
+        self,
+        offset: Tuple[Optional[int], Optional[int], Union[str, npir.AbsoluteKIndex, Optional[int]]],
+        is_serial: bool,
+        interval: Optional[npir.HorizontalMask] = None,
+    ) -> List[str]:
+        axes: List[str] = []
+
+        if interval is None:
+            interval = npir.HorizontalMask(
+                i=(common.AxisBound.start(0), common.AxisBound.end(0)),
+                j=(common.AxisBound.start(0), common.AxisBound.end(0)),
+            )
+
+        if offset[0] is not None:
+            axes.append(_slice_string("i", offset[0], interval.i))
+        if offset[1] is not None:
+            axes.append(_slice_string("j", offset[1], interval.j))
+
+        if isinstance(offset[2], numbers.Number):
+            bounds = (
+                (common.AxisBound.start(), common.AxisBound.start(offset=1))
+                if is_serial
+                else (common.AxisBound.start(), common.AxisBound.end())
+            )
+            k_str = "k_" if is_serial else "k"
+            axes.append(_slice_string(k_str, offset[2], bounds))
+        elif isinstance(offset[2], str):
+            axes.append(offset[2])
+        elif isinstance(offset[2], npir.AbsoluteKIndex):
+            axes.append(str(self.visit(offset[2].k, is_serial=is_serial, horizontal_mask=interval)))
+
+        return axes
 
     def visit_TemporaryDecl(
         self, node: npir.TemporaryDecl, **kwargs
@@ -166,12 +182,25 @@ class NpirCodegen(codegen.TemplatedGenerator, eve.VisitorWithSymbolTableTrait):
     VarKOffset = as_fmt("lk + {k}")
 
     def visit_FieldSlice(self, node: npir.FieldSlice, **kwargs: Any) -> Union[str, Collection[str]]:
-        k_offset = (
-            self.visit(node.k_offset, **kwargs)
-            if isinstance(node.k_offset, npir.VarKOffset)
-            else node.k_offset
-        )
-        offsets: Tuple[Optional[int], Optional[int], Union[str, int, None]] = (
+        need_extra_axis = False
+        if isinstance(node.k_offset, npir.VarKOffset):
+            k_offset = self.visit(node.k_offset, **kwargs)
+        elif isinstance(node.k_offset, npir.AbsoluteKIndex):
+            k_offset = node.k_offset
+            # The code as been modified to generate B[i:I,j:J,index]
+            # which is correct but will break because you can't brodcast 2D in 3D
+            # e.g. you can't write (for I, J, K the dimensions)
+            #   > (I,J,K) = (I,J)
+            # we need to use push the 2D into 3D realm by re-establishing a 3rd axis, e.g:
+            #   > A[i:I, j:J, k:K] = B[i:I, j:J, index][..., np.newaxis]
+            # This isn't true for FieldSlice which would lead to
+            # a (I, J, K) = (I, J, 1), which is structurally equal to the above extra axis add.
+            if not isinstance(k_offset.k, npir.FieldSlice):
+                need_extra_axis = True
+        else:
+            k_offset = node.k_offset
+
+        offsets: Tuple[Optional[int], Optional[int], Union[str, int, npir.AbsoluteKIndex, None]] = (
             node.i_offset,
             node.j_offset,
             k_offset,
@@ -182,16 +211,49 @@ class NpirCodegen(codegen.TemplatedGenerator, eve.VisitorWithSymbolTableTrait):
             decl = kwargs["symtable"][node.name]
             dimensions = decl.dimensions if isinstance(decl, npir.FieldDecl) else [True] * 3
             offsets = cast(
-                Tuple[Optional[int], Optional[int], Union[str, int, None]],
+                Tuple[Optional[int], Optional[int], Union[str, int, npir.AbsoluteKIndex, None]],
                 tuple(off if has_dim else None for has_dim, off in zip(dimensions, offsets)),
             )
 
-        args = _make_slice_access(offsets, kwargs["is_serial"], kwargs.get("horizontal_mask"))
-        data_index = self.visit(node.data_index, inside_slice=True, **kwargs)
+        args = self._make_slice_access(offsets, kwargs["is_serial"], kwargs.get("horizontal_mask"))
+        data_index = self.visit(
+            node.data_index,
+            inside_slice=kwargs.pop("inside_slice", True),
+            **kwargs,
+        )
+        if list(data_index) and need_extra_axis:
+            raise NotImplementedError(
+                "Numpy backend: can't combine Absolute access in K and data dimensions access"
+            )
 
         access_slice = ", ".join(args + list(data_index))
 
-        return f"{node.name}[{access_slice}]"
+        if len(node.data_index) == 1 and isinstance(node.data_index[0], npir.FieldSlice):
+            # Of the form:
+            #  > np.take_along_axis(
+            #  >    INPUT_FIELD.field_view[i:I,j:J,k:K],
+            #  >    DATA_INDEX_FIELD.field_view[i:I,j:J,k:K,None],
+            #  >    axis=-1
+            #  > ).squeeze(-1)
+            #
+            # ISSUES: - this bypass the shim_key which squeeze the dimensionality out
+            #         and make `None` fail
+            #         - this only works for 4D (I think)
+            # EXPLAINER: we take along the last axis (4D) the data by reading in the data_index
+            #            expressed as a FieldSlice (broadcasting), this give us the good data
+            #            but with an extra argument we squeeze out
+            access_slice = ", ".join(args)
+            field_access_str = "np.take_along_axis("
+            field_access_str += f"{node.name}.field_view[{access_slice}]"
+            field_access_str += f", {data_index[0][:-1]}, None]"
+            field_access_str += ", axis=-1)"
+            field_access_str += ".squeeze(-1)"
+        elif need_extra_axis:
+            field_access_str = f"{node.name}[{access_slice}][...,np.newaxis]"
+        else:
+            field_access_str = f"{node.name}[{access_slice}]"
+
+        return field_access_str
 
     def visit_LocalScalarAccess(
         self,
@@ -201,7 +263,7 @@ class NpirCodegen(codegen.TemplatedGenerator, eve.VisitorWithSymbolTableTrait):
         horizontal_mask: Optional[npir.HorizontalMask] = None,
         **kwargs: Any,
     ) -> Union[str, Collection[str]]:
-        args = _make_slice_access((0, 0, 0), is_serial, horizontal_mask)
+        args = self._make_slice_access((0, 0, 0), is_serial, horizontal_mask)
         if is_serial:
             args[2] = ":"
         return f"{node.name}[{', '.join(args)}]"

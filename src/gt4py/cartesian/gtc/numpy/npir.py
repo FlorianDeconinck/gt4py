@@ -118,21 +118,19 @@ class VarKOffset(common.VariableKOffset[Expr]):
     pass
 
 
+class AbsoluteKIndex(common.AbsoluteKIndex[Expr]):
+    """See gtc.common.AbsoluteKIndex"""
+
+    pass
+
+
 class FieldSlice(VectorLValue):
     name: eve.Coerced[eve.SymbolRef]
     i_offset: int
     j_offset: int
-    k_offset: Union[int, VarKOffset]
+    k_offset: Union[int, VarKOffset, AbsoluteKIndex]
     data_index: List[Expr] = eve.field(default_factory=list)
     kind: common.ExprKind = common.ExprKind.FIELD
-
-    @datamodels.validator("data_index")
-    def data_indices_are_scalar(
-        self, attribute: datamodels.Attribute, data_index: List[Expr]
-    ) -> None:
-        for index in data_index:
-            if index.kind != common.ExprKind.SCALAR:
-                raise ValueError("Data indices must be scalars")
 
 
 class ParamAccess(Expr):

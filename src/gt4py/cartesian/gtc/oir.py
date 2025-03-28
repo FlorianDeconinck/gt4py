@@ -37,6 +37,15 @@ class CodeBlock(common.BlockStmt[Stmt], Stmt):
     label: str
 
 
+class IteratorAccess(Expr):
+    class AxisName(eve.StrEnum):
+        I = "I"  # noqa: E741 [ambiguous-variable-name]
+        J = "J"
+        K = "K"
+
+    name: AxisName
+
+
 class Literal(common.Literal, Expr):
     pass
 
@@ -46,6 +55,12 @@ class ScalarAccess(common.ScalarAccess, Expr):
 
 
 class VariableKOffset(common.VariableKOffset[Expr]):
+    pass
+
+
+class AbsoluteKIndex(common.AbsoluteKIndex[Expr]):
+    """See gtc.common.AbsoluteKIndex"""
+
     pass
 
 

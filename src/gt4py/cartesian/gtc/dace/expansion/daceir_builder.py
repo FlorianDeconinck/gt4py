@@ -360,6 +360,9 @@ class DaCeIRBuilder(eve.NodeTranslator):
     ) -> dcir.VariableKOffset:
         return dcir.VariableKOffset(k=self.visit(node.k, **kwargs))
 
+    def visit_AbsoluteKIndex(self, node: oir.AbsoluteKIndex, **kwargs):
+        return dcir.AbsoluteKIndex(k=self.visit(node.k, **kwargs))
+
     def visit_LocalScalar(self, node: oir.LocalScalar, **kwargs: Any) -> dcir.LocalScalarDecl:
         return dcir.LocalScalarDecl(name=node.name, dtype=node.dtype)
 
@@ -371,6 +374,7 @@ class DaCeIRBuilder(eve.NodeTranslator):
         targets: list[oir.FieldAccess | oir.ScalarAccess],
         var_offset_fields: set[eve.SymbolRef],
         K_write_with_offset: set[eve.SymbolRef],
+        absolute_K_access_fields: Set[eve.SymbolRef],
         **kwargs: Any,
     ) -> dcir.IndexAccess | dcir.ScalarAccess:
         """Generate the relevant accessor to match the memlet that was previously setup.
@@ -402,6 +406,7 @@ class DaCeIRBuilder(eve.NodeTranslator):
                     targets=targets,
                     var_offset_fields=var_offset_fields,
                     K_write_with_offset=K_write_with_offset,
+                    absolute_K_access_fields=absolute_K_access_fields,
                     **kwargs,
                 ),
                 data_index=self.visit(
@@ -410,6 +415,7 @@ class DaCeIRBuilder(eve.NodeTranslator):
                     targets=targets,
                     var_offset_fields=var_offset_fields,
                     K_write_with_offset=K_write_with_offset,
+                    absolute_K_access_fields=absolute_K_access_fields,
                     **kwargs,
                 ),
                 dtype=node.dtype,
@@ -425,6 +431,7 @@ class DaCeIRBuilder(eve.NodeTranslator):
                     targets=targets,
                     var_offset_fields=var_offset_fields,
                     K_write_with_offset=K_write_with_offset,
+                    absolute_K_access_fields=absolute_K_access_fields,
                     **kwargs,
                 ),
                 dtype=node.dtype,
@@ -1214,6 +1221,14 @@ class DaCeIRBuilder(eve.NodeTranslator):
                 ):
                     K_write_with_offset.add(assign_node.left.name)
 
+        # Book keep - field that will have absolute access in K, which therefore
+        # need an IndexAccess down the line rather than scalar
+        absolute_K_access_fields: Set[eve.SymbolRef] = {
+            acc.name
+            for acc in node.walk_values().if_isinstance(oir.FieldAccess)
+            if isinstance(acc.offset, common.AbsoluteKIndex)
+        }
+
         sections_idx = next(
             idx
             for idx, item in enumerate(global_ctx.library_node.expansion_specification)
@@ -1231,6 +1246,7 @@ class DaCeIRBuilder(eve.NodeTranslator):
                 symbol_collector=symbol_collector,
                 var_offset_fields=var_offset_fields,
                 K_write_with_offset=K_write_with_offset,
+                absolute_K_access_fields=absolute_K_access_fields,
                 **kwargs,
             )
         )
@@ -1264,3 +1280,13 @@ class DaCeIRBuilder(eve.NodeTranslator):
             write_memlets=[memlet for memlet in field_memlets if memlet.field in write_fields],
             symbol_decls=list(symbol_collector.symbol_decls.values()),
         )
+
+    def visit_IteratorAccess(
+        self,
+        iterator_access: oir.IteratorAccess,
+        *,
+        symbol_collector: DaCeIRBuilder.SymbolCollector,
+        **kwargs,
+    ) -> dcir.ScalarAccess:
+        symbol_name = f"__{iterator_access.name.lower()}"
+        return dcir.ScalarAccess(name=symbol_name, dtype=iterator_access.dtype)
