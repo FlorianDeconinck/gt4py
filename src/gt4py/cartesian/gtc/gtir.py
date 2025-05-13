@@ -57,7 +57,7 @@ class AbsoluteKIndex(common.AbsoluteKIndex[Expr]):
     pass
 
 
-class ScalarAccess(common.ScalarAccess, Expr):  # type: ignore
+class ScalarAccess(common.ScalarAccess, Expr):
     pass
 
 

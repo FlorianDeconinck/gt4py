@@ -15,6 +15,7 @@ definitions for the keywords of the DSL.
 import collections
 import inspect
 import numbers
+import platform
 import types
 from typing import Callable, Dict, Type, Union
 
@@ -69,6 +70,8 @@ TYPE_HINT_AND_CAST_BUILTINS = {
     "i64",
     "f32",
     "f64",
+    "int",
+    "float",
 }
 
 REDUCTION_BUILTINS = {"reduce", "add"}
@@ -129,6 +132,10 @@ _VALID_DATA_TYPES = (
     np.float64,
 )
 
+# since platform.architecture() returns "('64bit', 'ELF')" for example, we extract the number from here
+ARCHITECTURE_LITERAL_PRECISION = int(platform.architecture()[0][:2])
+"literal precision of the architecture - 64 or 32"
+
 
 def _set_arg_dtypes(definition: Callable[..., None], dtypes: Dict[Type, Type]):
     def _parse_annotation(arg, annotation):
@@ -182,6 +189,7 @@ def stencil(
     rebuild=False,
     cache_settings=None,
     raise_if_not_cached=False,
+    literal_precision=ARCHITECTURE_LITERAL_PRECISION,
     **kwargs,
 ):
     """Generate an implementation of the stencil definition with the specified backend.
@@ -235,6 +243,10 @@ def stencil(
             - `root_path`: (str)
             - `dir_name`: (str)
 
+        literal_precision: `int` optional
+            Value to define the precision of generic casts `int` and `float`.
+            (System literal precision by default).
+
         **kwargs: `dict`, optional
             Extra backend-specific options. Check the specific backend
             documentation for further information.
@@ -274,6 +286,8 @@ def stencil(
         raise ValueError(f"Invalid 'raise_if_not_cached' bool value ('{raise_if_not_cached}')")
     if cache_settings is not None and not isinstance(cache_settings, dict):
         raise ValueError(f"Invalid 'cache_settings' dictionary ('{cache_settings}')")
+    if not isinstance(literal_precision, int) and literal_precision not in (32, 64):
+        raise ValueError(f"Invalid 'literal_precision' ('{literal_precision}')")
 
     module = None
     if name:
@@ -314,6 +328,7 @@ def stencil(
         backend_opts=kwargs,
         build_info=build_info,
         cache_settings=cache_settings or {},
+        literal_precision=literal_precision,
         impl_opts=_impl_opts,
     )
 

@@ -284,12 +284,25 @@ class DataType(enum.Enum):
         return result
 
 
-DataType.FRONTEND_TO_NATIVE = {
-    "i32": DataType.INT32,
-    "i64": DataType.INT64,
-    "f32": DataType.FLOAT32,
-    "f64": DataType.FLOAT64,
-}
+def frontend_type_to_native_type(literal_precision: int = 64) -> dict[str, DataType]:
+    """Return the mapping of frontend types to native types.
+
+    Args:
+        literal_precision (int, optional): Literal precision used for mapping.
+            Defaults to 64.
+
+    Returns:
+        dict[str, DataType]: Mapping of the frontend types to our DataTypes.
+    """
+    return {
+        "i32": DataType.INT32,
+        "i64": DataType.INT64,
+        "int": DataType.INT32 if literal_precision == 32 else DataType.INT64,
+        "f32": DataType.FLOAT32,
+        "f64": DataType.FLOAT64,
+        "float": DataType.FLOAT32 if literal_precision == 32 else DataType.FLOAT64,
+    }
+
 
 DataType.NATIVE_TYPE_TO_NUMPY = {
     DataType.DEFAULT: "float_",
