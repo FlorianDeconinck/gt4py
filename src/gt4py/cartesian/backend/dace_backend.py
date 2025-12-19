@@ -56,7 +56,9 @@ if TYPE_CHECKING:
 
 
 def _specialize_transient_strides(
-    sdfg: SDFG, layout_info: layout.LayoutInfo, replacement_dictionary: dict[str, str] | None = None
+    sdfg: SDFG,
+    layout_info: layout.LayoutInfo,
+    replacement_dictionary: dict[str, str] | None = None,
 ) -> None:
     # Find transients in this SDFG to specialize.
     stride_replacements = replace_strides(
@@ -580,7 +582,10 @@ auto ${name}(const std::array<gt::uint_t, 3>& domain) {
                 config.Config.set("compiler", "cuda", "backend", value="hip")
             config.Config.set("compiler", "cuda", "max_concurrent_streams", value=-1)
             config.Config.set(
-                "compiler", "cuda", "default_block_size", value=gt_config.DACE_DEFAULT_BLOCK_SIZE
+                "compiler",
+                "cuda",
+                "default_block_size",
+                value=gt_config.DACE_DEFAULT_BLOCK_SIZE,
             )
             config.Config.set("compiler", "cpu", "openmp_sections", value=False)
             code_objects = sdfg.generate_code()
@@ -632,7 +637,11 @@ namespace gt = gridtools;
             for field_name, boundary in compute_k_boundary(stencil_ir).items()
         }
         offset_dict: dict[str, tuple[int, int, int]] = {
-            k: (max(-v[0][0], 0), max(-v[1][0], 0), k_origins[k] if k in k_origins else 0)
+            k: (
+                max(-v[0][0], 0),
+                max(-v[1][0], 0),
+                k_origins[k] if k in k_origins else 0,
+            )
             for k, v in field_extents.items()
         }
 
@@ -685,7 +694,9 @@ namespace gt = gridtools;
                 )
             )
             symbols[name] = fmt.format(
-                name=name, ndim=len(array.shape), origin=",".join(str(o) for o in origin)
+                name=name,
+                ndim=len(array.shape),
+                origin=",".join(str(o) for o in origin),
             )
 
         # the remaining arguments are variables and can be passed by name
@@ -821,7 +832,8 @@ class DaCePyExtModuleGenerator(PyExtModuleGenerator):
     def generate_class_members(self) -> str:
         res = super().generate_class_members()
         filepath = self.builder.module_path.joinpath(
-            os.path.dirname(self.builder.module_path), self.builder.module_name + ".sdfg"
+            os.path.dirname(self.builder.module_path),
+            self.builder.module_name + ".sdfg",
         )
         res += f'\nSDFG_PATH = "{filepath}"\n'
         return res
@@ -892,6 +904,28 @@ class DaceGPUBackend(BaseDaceBackend):
         "device": "gpu",
         "layout_map": layout.layout_maker_factory((2, 1, 0)),
         "is_optimal_layout": layout.layout_checker_factory(layout.layout_maker_factory((2, 1, 0))),
+    }
+    MODULE_GENERATOR_CLASS = DaCeCUDAPyExtModuleGenerator
+    options: ClassVar[GTBackendOptions] = {
+        **BaseGTBackend.GT_BACKEND_OPTS,
+        "device_sync": {"versioning": True, "type": bool},
+    }
+
+    def generate_extension(self) -> None:
+        return self.make_extension(uses_cuda=True)
+
+
+@register
+class DaceGPUKFirstBackend(BaseDaceBackend):
+    """DaCe python backend using gt4py.cartesian.gtc."""
+
+    name = "dace:gpu_kfirst"
+    languages: ClassVar[dict] = {"computation": "cuda", "bindings": ["python"]}
+    storage_info: ClassVar[layout.LayoutInfo] = {
+        "alignment": 32,
+        "device": "gpu",
+        "layout_map": layout.layout_maker_factory((0, 1, 2)),
+        "is_optimal_layout": layout.layout_checker_factory(layout.layout_maker_factory((0, 1, 2))),
     }
     MODULE_GENERATOR_CLASS = DaCeCUDAPyExtModuleGenerator
     options: ClassVar[GTBackendOptions] = {
