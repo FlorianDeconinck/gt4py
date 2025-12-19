@@ -238,7 +238,11 @@ class OIRToTreeIR(eve.NodeVisitor):
         )
 
     def visit_Interval(
-        self, node: oir.Interval, loop_order: common.LoopOrder, axis_start: str, axis_end: str
+        self,
+        node: oir.Interval,
+        loop_order: common.LoopOrder,
+        axis_start: str,
+        axis_end: str,
     ) -> tir.Bounds:
         start = self.visit(node.start, axis_start=axis_start, axis_end=axis_end)
         end = self.visit(node.end, axis_start=axis_start, axis_end=axis_end)
@@ -248,7 +252,7 @@ class OIRToTreeIR(eve.NodeVisitor):
 
         return tir.Bounds(start=start, end=end)
 
-    def _vertical_loop_schedule(self) -> dtypes.ScheduleType:
+    def _vertical_loop_schedule(self, loop_order: common.LoopOrder) -> dtypes.ScheduleType:
         """
         Defines the vertical loop schedule.
 
@@ -257,12 +261,19 @@ class OIRToTreeIR(eve.NodeVisitor):
           - and run it in parallel on CPU and sequential on GPU.
         """
         if self._device_type == dtypes.DeviceType.GPU:
-            return dtypes.ScheduleType.Sequential
+            return (
+                dtypes.ScheduleType.GPU_Device
+                if loop_order == common.LoopOrder.PARALLEL
+                else dtypes.ScheduleType.Sequential
+            )
 
         return DEFAULT_MAP_SCHEDULE[self._device_type]
 
     def visit_VerticalLoopSection(
-        self, node: oir.VerticalLoopSection, ctx: tir.Context, loop_order: common.LoopOrder
+        self,
+        node: oir.VerticalLoopSection,
+        ctx: tir.Context,
+        loop_order: common.LoopOrder,
     ) -> None:
         bounds = self.visit(
             node.interval,
@@ -277,7 +288,7 @@ class OIRToTreeIR(eve.NodeVisitor):
             ),
             loop_order=loop_order,
             bounds_k=bounds,
-            schedule=self._vertical_loop_schedule(),
+            schedule=self._vertical_loop_schedule(loop_order),
             children=[],
             parent=ctx.current_scope,
         )
@@ -406,7 +417,11 @@ class OIRToTreeIR(eve.NodeVisitor):
         return f"{dtype}({expression})"
 
     def visit_CartesianOffset(
-        self, node: common.CartesianOffset, field: oir.FieldAccess, ctx: tir.Context, **_kwargs: Any
+        self,
+        node: common.CartesianOffset,
+        field: oir.FieldAccess,
+        ctx: tir.Context,
+        **_kwargs: Any,
     ) -> str:
         shift = ctx.root.shift[field.name]
         indices: list[str] = []
@@ -425,7 +440,11 @@ class OIRToTreeIR(eve.NodeVisitor):
         return ", ".join(indices)
 
     def visit_VariableKOffset(
-        self, node: oir.VariableKOffset, field: oir.FieldAccess, ctx: tir.Context, **kwargs: Any
+        self,
+        node: oir.VariableKOffset,
+        field: oir.FieldAccess,
+        ctx: tir.Context,
+        **kwargs: Any,
     ) -> str:
         shift = ctx.root.shift[field.name]
         i_shift = f" + {shift[tir.Axis.I]}" if shift[tir.Axis.I] != 0 else ""
@@ -439,7 +458,11 @@ class OIRToTreeIR(eve.NodeVisitor):
         )
 
     def visit_AbsoluteKIndex(
-        self, node: oir.AbsoluteKIndex, field: oir.FieldAccess, ctx: tir.Context, **kwargs: Any
+        self,
+        node: oir.AbsoluteKIndex,
+        field: oir.FieldAccess,
+        ctx: tir.Context,
+        **kwargs: Any,
     ) -> str:
         shift = ctx.root.shift[field.name]
         i_shift = f" + {shift[tir.Axis.I]}" if shift[tir.Axis.I] != 0 else ""
