@@ -356,7 +356,6 @@ class AbsoluteKIndex(eve.GenericNode, Generic[ExprT]):
 
     Restrictions:
     - Centered I/J
-    - No data dimensions
     - Read-only
     """
 

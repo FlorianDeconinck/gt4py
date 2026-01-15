@@ -23,6 +23,7 @@ from gt4py.cartesian.gtscript import (
     J,
     K,
     IJ,
+    IJK,
     computation,
     horizontal,
     interval,
@@ -1200,7 +1201,7 @@ def test_read_after_write_stencil(backend):
                 raises=NotImplementedError, reason="Absolute K indexing not yet supported."
             ),
         )
-        for backend in ["gt:cpu_ifirst", "numpy"]
+        for backend in ["gt:cpu_ifirst"]
     ],
 )
 def test_absolute_K_index_raise(backend):
@@ -1214,6 +1215,7 @@ def test_absolute_K_index_raise(backend):
     "backend",
     [
         pytest.param("debug"),
+        pytest.param("numpy"),
         pytest.param("dace:cpu", marks=[pytest.mark.requires_dace]),
         pytest.param("dace:gpu", marks=[pytest.mark.requires_dace, pytest.mark.requires_gpu]),
     ],
@@ -1222,6 +1224,7 @@ def test_absolute_K_index(backend):
     domain = (5, 5, 5)
 
     in_arr = gt_storage.ones(backend=backend, shape=domain, dtype=np.float64)
+    in_arr_ddim = gt_storage.ones(backend=backend, shape=domain + (2,), dtype=np.float64)
     idx_arr = gt_storage.zeros(backend=backend, shape=(domain[0], domain[1]), dtype=np.int64)
     idx_arr_32 = gt_storage.zeros(backend=backend, shape=(domain[0], domain[1]), dtype=np.int32)
     k_arr = gt_storage.zeros(backend=backend, shape=(domain[2],), dtype=np.float64)
@@ -1322,6 +1325,24 @@ def test_absolute_K_index(backend):
     out_arr[:, :, :] = 0
     test_conditional_absolute(in_arr, out_arr)
     assert (out_arr[:, :, :] == 3).all()
+
+    @gtscript.stencil(backend=backend)
+    def test_data_dims(
+        in_field_ddim: Field[IJK, (np.float64, (2,))],
+        index_field: Field[IJ, np.int64],
+        out_field: Field[np.float64],
+    ) -> None:
+        with computation(PARALLEL), interval(...):
+            out_field = in_field_ddim.at(K=2, ddim=[1])
+            out_field += in_field_ddim.at(K=index_field, ddim=[0])
+
+    in_arr_ddim[:, :, :, :] = 1
+    in_arr_ddim[:, :, 2, 0] = 42.42
+    in_arr_ddim[:, :, 2, 1] = 10.00
+    idx_arr[:, :] = 2
+    out_arr[:, :, :] = 0
+    test_data_dims(in_arr_ddim, idx_arr, out_arr)
+    assert (out_arr[:, :, :] == 52.42).all()
 
 
 @pytest.mark.parametrize(
