@@ -459,12 +459,30 @@ class DefIRToGTIR(IRNodeVisitor):
         )
 
     def visit_BinOpExpr(self, node: BinOpExpr) -> Union[gtir.BinaryOp, gtir.NativeFuncCall]:
-        if node.op in (BinaryOperator.POW, BinaryOperator.MOD):
+        if node.op == BinaryOperator.MOD:
             return gtir.NativeFuncCall(
                 func=common.NativeFunction[node.op.name],
                 args=[self.visit(node.lhs), self.visit(node.rhs)],
                 loc=location_to_source_location(node.loc),
             )
+
+        if node.op == BinaryOperator.POW:
+            value = self.visit(node.lhs)
+            exponent = self.visit(node.rhs)
+            if exponent.dtype in [
+                common.DataType.INT32,
+                common.DataType.INT64,
+                common.DataType.INT8,
+            ]:
+                func = common.NativeFunction.IPOW
+            else:
+                func = common.NativeFunction.POW
+            return gtir.NativeFuncCall(
+                func=func,
+                args=[value, exponent],
+                loc=location_to_source_location(node.loc),
+            )
+
         return gtir.BinaryOp(
             left=self.visit(node.lhs),
             right=self.visit(node.rhs),
