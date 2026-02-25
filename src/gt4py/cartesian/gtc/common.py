@@ -167,7 +167,8 @@ class NativeFunction(eve.StrEnum):
     ARCTANH = "arctanh"
 
     SQRT = "sqrt"
-    POW = "pow"
+    POW = "pows"
+    IPOW = "ipow"
     EXP = "exp"
     LOG = "log"
     LOG10 = "log10"
@@ -218,6 +219,7 @@ NativeFunction.IR_OP_TO_NUM_ARGS = {
         NativeFunction.ARCTANH: 1,
         NativeFunction.SQRT: 1,
         NativeFunction.POW: 2,
+        NativeFunction.IPOW: 2,
         NativeFunction.EXP: 1,
         NativeFunction.LOG: 1,
         NativeFunction.LOG10: 1,
@@ -621,7 +623,7 @@ def native_func_call_dtype_propagation(*, strict: bool = True) -> datamodels.Roo
             NativeFunction.FLOAT64,
         ):
             instance.dtype = _precision_to_datatype(instance.func)  # type: ignore[attr-defined]
-        elif instance.func == NativeFunction.POW:
+        elif instance.func in [NativeFunction.POW, NativeFunction.IPOW]:
             # Use non-strict to derive return type as max(type(base), type(exponent))
             common_dtype = verify_and_get_common_dtype(cls, instance.args, strict=False)
             if common_dtype:
@@ -968,6 +970,7 @@ OP_TO_UFUNC_NAME: Final[
         NativeFunction.ARCTANH: "arctanh",
         NativeFunction.SQRT: "sqrt",
         NativeFunction.POW: "power",
+        NativeFunction.IPOW: "power",
         NativeFunction.EXP: "exp",
         NativeFunction.LOG: "log",
         NativeFunction.LOG10: "log10",

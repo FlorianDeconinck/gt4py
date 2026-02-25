@@ -226,6 +226,7 @@ class OIRToTasklet(eve.NodeVisitor):
             common.NativeFunction.ARCTANH: "atanh",
             common.NativeFunction.SQRT: "dace.math.sqrt",
             common.NativeFunction.POW: "dace.math.pow",
+            common.NativeFunction.IPOW: "dace.math.ipow",
             common.NativeFunction.EXP: "dace.math.exp",
             common.NativeFunction.LOG: "dace.math.log",
             common.NativeFunction.LOG10: "log10",

@@ -165,6 +165,7 @@ class GTCppCodegen(codegen.TemplatedGenerator, eve.VisitorWithSymbolTableTrait):
                 NativeFunction.ARCTANH: "std::atanh",
                 NativeFunction.SQRT: "std::sqrt",
                 NativeFunction.POW: "std::pow",
+                NativeFunction.IPOW: "std::pow",  # incorrect
                 NativeFunction.EXP: "std::exp",
                 NativeFunction.LOG: "std::log",
                 NativeFunction.LOG10: "std::log10",

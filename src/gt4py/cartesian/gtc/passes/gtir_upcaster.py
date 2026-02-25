@@ -120,6 +120,7 @@ class _GTIRUpcasting(eve.NodeTranslator):
             common.NativeFunction.FLOAT64,
             # Don't upcast the exponent of a power function because of the base, e.g. `3.0 ** 2`
             common.NativeFunction.POW,
+            common.NativeFunction.IPOW,
         ]:
             # Make sure to upcast arguments of those operations anyway, e.g.
             # float(my_int32 + my_int64) -> float(cast(int64, my_int32) + a my_int64)
