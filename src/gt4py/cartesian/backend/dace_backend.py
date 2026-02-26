@@ -610,7 +610,8 @@ auto ${name}(const std::array<gt::uint_t, 3>& domain) {
         )
 
         if (
-            not is_gpu
+            gt_config.build_settings["openmp"]["use_openmp"]
+            and not is_gpu
             and not has_all_sequential_compute
             and any(
                 array.transient and array.lifetime == dtypes.AllocationLifetime.Persistent
