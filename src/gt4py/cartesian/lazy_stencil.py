@@ -76,6 +76,11 @@ class LazyStencil:
         """Pass through to the implementation.run."""
         self.implementation.run(*args, **kwargs)
 
+    def __schedule_tree__(self):
+        raise TypeError(
+            f'Only dace backends are supported in DaCe-orchestrated programs. (found "{self.backend.name}")'
+        )
+
     def __sdfg__(self, **kwargs):
         raise TypeError(
             f'Only dace backends are supported in DaCe-orchestrated programs. (found "{self.backend.name}")'

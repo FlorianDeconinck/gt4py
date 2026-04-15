@@ -67,6 +67,11 @@ class DaCeLazyStencil(LazyStencil, SDFGConvertible):
             **norm_kwargs,
         )
 
+    def __schedule_tree__(self) -> tn.ScheduleTreeRoot:
+        sdfg_manager = SDFGManager(self.builder)
+        stree = sdfg_manager.schedule_tree()
+        return stree
+
     def __sdfg_closure__(self, reevaluate: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
         return {}
 

@@ -653,6 +653,11 @@ class StencilObject(abc.ABC):
             f'Only dace backends are supported in DaCe-orchestrated programs. (found "{self.backend}")'
         )
 
+    def __schedule_tree__(self):
+        raise TypeError(
+            f'Only dace backends are supported in DaCe-orchestrated programs. (found "{self.backend}")'
+        )
+
     def __sdfg_signature__(self):
         raise TypeError(
             f'Only dace backends are supported in DaCe-orchestrated programs. (found "{self.backend}")'
