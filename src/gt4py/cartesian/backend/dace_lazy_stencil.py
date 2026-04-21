@@ -8,10 +8,13 @@
 
 from __future__ import annotations
 
+import ast
+
 from typing import TYPE_CHECKING, Any, Dict, Optional, Sequence, Set, Tuple
 
 import dace
-from dace.frontend.python.common import SDFGConvertible
+from dace.frontend.python.common import SDFGConvertible, ScheduleTreeConvertible
+from dace.sdfg.analysis.schedule_tree import treenodes as tn
 
 from gt4py.cartesian.backend.dace_backend import SDFGManager
 from gt4py.cartesian.backend.dace_stencil_object import DaCeStencilObject, add_optional_fields
@@ -23,7 +26,7 @@ if TYPE_CHECKING:
     from gt4py.cartesian.stencil_builder import StencilBuilder
 
 
-class DaCeLazyStencil(LazyStencil, SDFGConvertible):
+class DaCeLazyStencil(LazyStencil, SDFGConvertible, ScheduleTreeConvertible):
     def __init__(self, builder: StencilBuilder):
         if "dace" not in builder.backend.name:
             raise ValueError("Trying to build a DaCeLazyStencil for non-dace backend.")
@@ -67,14 +70,25 @@ class DaCeLazyStencil(LazyStencil, SDFGConvertible):
             **norm_kwargs,
         )
 
-    def __schedule_tree__(self) -> tn.ScheduleTreeRoot:
-        sdfg_manager = SDFGManager(self.builder)
-        stree = sdfg_manager.schedule_tree()
-        return stree
-
     def __sdfg_closure__(self, reevaluate: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
         return {}
 
     def __sdfg_signature__(self) -> Tuple[Sequence[str], Sequence[str]]:
+        return self._signature_dace_style()
+    
+    def __schedule_tree__(self,
+            *args,
+            lambda_bindings: Optional[Dict[str, ast.AST]] = None,
+            callable_bindings: Optional[Dict[str, Any]] = None,
+            **kwargs
+        ) -> tn.ScheduleTreeRoot:
+        sdfg_manager = SDFGManager(self.builder)
+        stree = sdfg_manager.schedule_tree()
+        return stree
+
+    def _signature_dace_style(self) -> Tuple[Sequence[str], Sequence[str]]:
         args = [arg.name for arg in self.builder.gtir.api_signature]
         return (args, [])
+
+    def __schedule_tree_signature__(self) -> Tuple[Sequence[str], Sequence[str]]:
+        return self._signature_dace_style()

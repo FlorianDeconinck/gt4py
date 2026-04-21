@@ -9,13 +9,14 @@
 from __future__ import annotations
 
 import abc
+import ast
 import collections.abc
 import sys
 import time
 from dataclasses import dataclass
 from numbers import Number
 from pickle import dumps
-from typing import Any, Callable, ClassVar, Literal, Union, cast
+from typing import Any, Callable, ClassVar, Literal, Union, cast, Sequence
 
 import numpy as np
 
@@ -24,6 +25,8 @@ from gt4py.cartesian.definitions import AccessKind, DomainInfo, FieldInfo, Param
 from gt4py.cartesian.gtc import utils as gtc_utils
 from gt4py.cartesian.gtc.definitions import Index, Shape
 from gt4py.storage.cartesian import utils as storage_utils
+
+from dace.sdfg.analysis.schedule_tree import treenodes as tn
 
 
 try:
@@ -653,7 +656,17 @@ class StencilObject(abc.ABC):
             f'Only dace backends are supported in DaCe-orchestrated programs. (found "{self.backend}")'
         )
 
-    def __schedule_tree__(self):
+    def __schedule_tree__(self,
+            *args,
+            lambda_bindings: dict[str, ast.AST] | None = None,
+            callable_bindings: dict[str, Any] | None = None,
+            **kwargs,
+        ) -> tn.ScheduleTreeRoot:
+        raise TypeError(
+            f'Only dace backends are supported in DaCe-orchestrated programs. (found "{self.backend}")'
+        )
+
+    def __schedule_tree_signature__(self) -> tuple[Sequence[str], Sequence[str]]:
         raise TypeError(
             f'Only dace backends are supported in DaCe-orchestrated programs. (found "{self.backend}")'
         )
