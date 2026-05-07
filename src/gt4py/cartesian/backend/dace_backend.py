@@ -491,6 +491,10 @@ class DaCeComputationCodegen:
         """\
 auto ${name}(const std::array<gt::uint_t, 3>& domain) {
     return [domain](${",".join(functor_args)}) {
+        feenableexcept(FE_DIVBYZERO | FE_INVALID | FE_OVERFLOW | FE_UNDERFLOW);
+        __sighandler_t p_signal = signal(SIGFPE, handler);
+
+
         const int __I = domain[0];
         const int __J = domain[1];
         const int __K = domain[2];
@@ -499,6 +503,9 @@ auto ${name}(const std::array<gt::uint_t, 3>& domain) {
         auto allocator = gt::sid::cached_allocator(&${allocator}<char[]>);
         ${"\\n".join(tmp_allocs)}
         __program_${name}(${",".join(["&dace_handle", *dace_args])});
+
+        signal(SIGFPE, p_signal);
+
     };
 }
 """
@@ -637,8 +644,29 @@ auto ${name}(const std::array<gt::uint_t, 3>& domain) {
 #include <gridtools/sid/sid_shift_origin.hpp>
 #include <gridtools/sid/allocator.hpp>
 #include <gridtools/stencil/cartesian.hpp>
+#include <cfenv>
+#include <signal.h>
 {"#include <gridtools/common/cuda_util.hpp>" if is_gpu else omp_header}
+#include <thread>
+#include <mutex>
+#include <execinfo.h>
+
 namespace gt = gridtools;
+std::mutex counter_mutex;
+
+void handler(int signum)
+{{
+    std::lock_guard<std::mutex> lock(counter_mutex);
+    const char* desc = strsignal(signum);
+    printf("Handling signal %s\\n", desc);
+
+    void *array[10];
+    size_t size;
+    size = backtrace(array, 10);
+    backtrace_symbols_fd(array, size, STDERR_FILENO);
+
+    exit(signum);
+}}
 
 {computations}
 

@@ -233,7 +233,7 @@ def build_pybind_ext(
         library_dirs=[*library_dirs],
         libraries=[*libraries],
         language="c++",
-        extra_compile_args=extra_compile_args,
+        extra_compile_args=[*extra_compile_args, "-g"],
         extra_link_args=extra_link_args,
     )
 
