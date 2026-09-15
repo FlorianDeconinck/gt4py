@@ -125,6 +125,11 @@ class HorizontalLoop(TreeScope):
 
     schedule: dtypes.ScheduleType
 
+class HorizontalRestriction(TreeScope):
+    """HorizontalRestriction is only a temporary node in the IR.
+    See visit_HorizontalExection to see how it is immediately transformed to an
+    HorizontalLoop during oir->treeir transformation"""
+    oir_hr: common.HorizontalRestriction
 
 class SequentialVerticalLoop(TreeScope):
     iteration_variable: eve.SymbolRef

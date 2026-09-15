@@ -352,7 +352,7 @@ class SDFGManager:
         )
         oir = oir_pipeline.run(oir)
 
-        tir = OIRToTreeIR(self.builder).visit(oir)
+        tir = OIRToTreeIR(self.builder, True).visit(oir)
 
         return TreeIRToScheduleTree().visit(tir)
 

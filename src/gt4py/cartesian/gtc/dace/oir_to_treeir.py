@@ -16,6 +16,7 @@ from gt4py.cartesian.gtc import common, definitions, oir
 from gt4py.cartesian.gtc.dace import oir_to_tasklet, treeir as tir, utils
 from gt4py.cartesian.gtc.passes.gtir_k_boundary import compute_k_boundary
 from gt4py.cartesian.gtc.passes.oir_optimizations import utils as oir_utils
+from gt4py.cartesian.gtc.dace.treeir import HorizontalLoop
 from gt4py.cartesian.stencil_builder import StencilBuilder
 
 
@@ -44,6 +45,12 @@ def _resolve_map_schedule(device_type: dtypes.DeviceType) -> dtypes.ScheduleType
 
     return dtypes.ScheduleType.CPU_Multicore
 
+def _make_bounds_from_horizontal_mask(axis_bound: common.AxisBound, axis: str) -> str:
+        offset_axis = ""
+        if axis_bound.level == common.LevelMarker.END:
+            offset_axis = f"{axis} + "
+        return f"{offset_axis}{axis_bound.offset}"
+
 
 class OIRToTreeIR(eve.NodeVisitor):
     """
@@ -55,9 +62,13 @@ class OIRToTreeIR(eve.NodeVisitor):
 
     This class _does not_ deal with Tasklet representation, it defers that
     work to the OIRToTasklet visitor.
+
+    Args:
+        builder: the stencil builder carrying configurations and IRs
+        make_hr_into_he: a (temporary) boolean flag turning Horizontal Restrictions into Horizontal Executions
     """
 
-    def __init__(self, builder: StencilBuilder) -> None:
+    def __init__(self, builder: StencilBuilder, make_hr_into_he: bool) -> None:
         device_type_translate = {
             "CPU": dtypes.DeviceType.CPU,
             "GPU": dtypes.DeviceType.GPU,
@@ -70,6 +81,7 @@ class OIRToTreeIR(eve.NodeVisitor):
         self._device_type = device_type_translate[device_type.upper()]
         self._api_signature = builder.gtir.api_signature
         self._k_bounds = compute_k_boundary(builder.gtir)
+        self._make_hr_into_he = make_hr_into_he
 
     def visit_CodeBlock(self, node: oir.CodeBlock, ctx: tir.Context) -> None:
         dace_tasklet, inputs, outputs = oir_to_tasklet.OIRToTasklet().visit_CodeBlock(
@@ -164,6 +176,95 @@ class OIRToTreeIR(eve.NodeVisitor):
             groups = self._group_statements(node)
             self.visit(groups, ctx=ctx)
 
+        # Put this on a hook to flip between IF/ELSE and treeir.HR 
+
+        if self._make_hr_into_he:
+            # Hypothesis are:
+            #   - HorizontalRestriction are NEVER nested into any control flow or into one another
+            #   - HorizontalRestraction ALWAYS apply to both I and J even if only one of the axis is given
+            #     (the other one is the stencil size)
+
+            assert loop.parent
+            ctx.current_scope.children.remove(loop)
+
+            stencil_hl = tir.HorizontalLoop(
+                bounds_i=tir.Bounds(start=axis_start_i, end=axis_end_i),
+                bounds_j=tir.Bounds(start=axis_start_j, end=axis_end_j),
+                schedule=_resolve_map_schedule(self._device_type),
+                children=[],
+                parent=ctx.current_scope,
+            )
+            ctx.current_scope.children.append(stencil_hl)
+
+            for child in loop.children:
+                if isinstance(child, tir.HorizontalRestriction):
+                    # Turn HR into HL
+                    i_start = (
+                        _make_bounds_from_horizontal_mask(child.oir_hr.mask.i.start, tir.Axis.I.domain_dace_symbol())
+                        if child.oir_hr.mask.i.start
+                        else stencil_hl.bounds_i.start
+                    )
+                    i_end = str(
+                        _make_bounds_from_horizontal_mask(child.oir_hr.mask.i.end, tir.Axis.I.domain_dace_symbol())
+                        if child.oir_hr.mask.i.end
+                        else stencil_hl.bounds_i.end
+                    )
+                    j_start = str(
+                        _make_bounds_from_horizontal_mask(child.oir_hr.mask.j.start, tir.Axis.J.domain_dace_symbol())
+                        if child.oir_hr.mask.j.start
+                        else stencil_hl.bounds_j.start
+                    )
+                    j_end = str(
+                        _make_bounds_from_horizontal_mask(child.oir_hr.mask.j.end, tir.Axis.J.domain_dace_symbol())
+                        if child.oir_hr.mask.j.end
+                        else stencil_hl.bounds_j.end
+                    )
+                    restricted_hl = tir.HorizontalLoop(
+                        bounds_i=tir.Bounds(start=i_start, end=i_end),
+                        bounds_j=tir.Bounds(start=j_start, end=j_end),
+                        schedule=_resolve_map_schedule(self._device_type),
+                        children=[],
+                        parent=ctx.current_scope,
+                    )
+                    restricted_hl.children = child.children
+                    ctx.current_scope.children.append(restricted_hl)
+
+                    # Make a new "stencil_hl"
+                    stencil_hl = tir.HorizontalLoop(
+                        bounds_i=tir.Bounds(start=axis_start_i, end=axis_end_i),
+                        bounds_j=tir.Bounds(start=axis_start_j, end=axis_end_j),
+                        schedule=_resolve_map_schedule(self._device_type),
+                        children=[],
+                        parent=ctx.current_scope,
+                    )
+                    ctx.current_scope.children.append(stencil_hl)
+                else:
+                    stencil_hl.children.append(child)
+                    child.parent = stencil_hl.parent
+
+            to_remove = []
+            for child in ctx.current_scope.children:
+                if isinstance(child, HorizontalLoop) and len(child.children) == 0:
+                    to_remove.append(child)
+            
+            for empty_child in to_remove:
+                ctx.current_scope.children.remove(empty_child)
+
+            # Create a new stencil-HorizontalLoop
+            # Go again from the first HL found
+            # -> IF HorizontalRestriction
+            #   -> turn it into an HL
+            #   -> re-scope to this HL parent
+            #   -> create a new stencil-HL
+            # -> IF CodeBlock
+            #   -> Parent the Codeblock to the stencil-HL
+
+            # After all of this I can check the original HL has no more children
+            # and remove it from parent.children
+
+
+
+
     def visit_MaskStmt(self, node: oir.MaskStmt, ctx: tir.Context) -> None:
         if _is_boolean_scalar(node.mask):
             condition_name = str(node.mask.name)
@@ -188,14 +289,24 @@ class OIRToTreeIR(eve.NodeVisitor):
         self, node: oir.HorizontalRestriction, ctx: tir.Context
     ) -> None:
         """Translate `region` concept into If control flow in TreeIR."""
-        condition_code = self.visit(node.mask, ctx=ctx)
-        if_else = tir.IfElse(
-            if_condition_code=condition_code, children=[], parent=ctx.current_scope
-        )
-
-        with if_else.scope(ctx):
-            groups = self._group_statements(node)
-            self.visit(groups, ctx=ctx)
+        skip_hr = isinstance(ctx.current_scope, tir.IfElse)
+        if self._make_hr_into_he and not skip_hr:
+            horizontal_restriction = tir.HorizontalRestriction(
+                oir_hr=node,
+                parent=ctx.current_scope,
+                children=[],
+            )
+            with horizontal_restriction.scope(ctx):
+                groups = self._group_statements(node)
+                self.visit(groups, ctx=ctx)                
+        else:
+            condition_code = self.visit(node.mask, ctx=ctx)
+            if_else = tir.IfElse(
+                if_condition_code=condition_code, children=[], parent=ctx.current_scope
+            )
+            with if_else.scope(ctx):
+                groups = self._group_statements(node)
+                self.visit(groups, ctx=ctx)
 
     def visit_HorizontalMask(self, node: common.HorizontalMask, ctx: tir.Context) -> str:
         loop_i = tir.Axis.I.iteration_symbol()
