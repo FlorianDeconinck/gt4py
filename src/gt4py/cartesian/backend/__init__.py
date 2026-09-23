@@ -35,8 +35,9 @@ try:
     from .dace_backend import DaceCPUBackend, DaceCPUKFirstBackend, DaceGPUBackend
 
     __all__ += ["DaceCPUBackend", "DaceCPUKFirstBackend", "DaceGPUBackend"]
-except ImportError:
+except ImportError as e:
     warn(
-        "GT4Py was unable to load DaCe. DaCe backends (`dace:cpu`, `dace:cpu_kfirst`, and `dace:gpu`) will not be available.",
+        "GT4Py was unable to load DaCe. DaCe backends (`dace:cpu`, `dace:cpu_kfirst`, and `dace:gpu`) "
+        f"will not be available. Import error: {e}",
         stacklevel=2,
     )

@@ -6,9 +6,11 @@
 # Please, refer to the LICENSE file in the root directory.
 # SPDX-License-Identifier: BSD-3-Clause
 
+import copy
 from typing import Any, List, TypeAlias, TypeGuard
 
 from dace import data, dtypes, symbolic
+from ordered_set import OrderedSet
 
 import gt4py.cartesian.config as gt_config
 from gt4py import eve
@@ -16,14 +18,14 @@ from gt4py.cartesian.gtc import common, definitions, oir
 from gt4py.cartesian.gtc.dace import oir_to_tasklet, treeir as tir, utils
 from gt4py.cartesian.gtc.passes.gtir_k_boundary import compute_k_boundary
 from gt4py.cartesian.gtc.passes.oir_optimizations import utils as oir_utils
-from gt4py.cartesian.gtc.dace.treeir import HorizontalLoop
 from gt4py.cartesian.stencil_builder import StencilBuilder
 
 
-ControlFlow: TypeAlias = (
+OirControlFlow: TypeAlias = (
     oir.HorizontalExecution | oir.While | oir.MaskStmt | oir.HorizontalRestriction
 )
 """All control flow OIR nodes"""
+
 
 DEFAULT_STORAGE_TYPE = {
     dtypes.DeviceType.CPU: dtypes.StorageType.Default,
@@ -45,11 +47,40 @@ def _resolve_map_schedule(device_type: dtypes.DeviceType) -> dtypes.ScheduleType
 
     return dtypes.ScheduleType.CPU_Multicore
 
+
 def _make_bounds_from_horizontal_mask(axis_bound: common.AxisBound, axis: str) -> str:
     offset_axis = ""
     if axis_bound.level == common.LevelMarker.END:
         offset_axis = f"{axis} + "
     return f"{offset_axis}{axis_bound.offset}"
+
+
+def make_IJbounds_from_mask(
+    oir_hr: oir.HorizontalRestriction, default_bounds: tuple[tir.Bounds, tir.Bounds]
+) -> tuple[tir.Bounds, tir.Bounds]:
+    i_start = (
+        _make_bounds_from_horizontal_mask(oir_hr.mask.i.start, tir.Axis.I.domain_dace_symbol())
+        if oir_hr.mask.i.start
+        else default_bounds[0].start
+    )
+    i_end = str(
+        _make_bounds_from_horizontal_mask(oir_hr.mask.i.end, tir.Axis.I.domain_dace_symbol())
+        if oir_hr.mask.i.end
+        else default_bounds[0].end
+    )
+    j_start = str(
+        _make_bounds_from_horizontal_mask(oir_hr.mask.j.start, tir.Axis.J.domain_dace_symbol())
+        if oir_hr.mask.j.start
+        else default_bounds[1].start
+    )
+    j_end = str(
+        _make_bounds_from_horizontal_mask(oir_hr.mask.j.end, tir.Axis.J.domain_dace_symbol())
+        if oir_hr.mask.j.end
+        else default_bounds[1].end
+    )
+    bounds = (tir.Bounds(start=i_start, end=i_end), tir.Bounds(start=j_start, end=j_end))
+    return bounds
+
 
 class OIRToTreeIR(eve.NodeVisitor):
     """
@@ -95,18 +126,18 @@ class OIRToTreeIR(eve.NodeVisitor):
         )
         ctx.current_scope.children.append(tasklet)
 
-    def _group_statements(self, node: ControlFlow) -> list[oir.CodeBlock | ControlFlow]:
+    def _group_statements(self, node: OirControlFlow) -> list[oir.CodeBlock | OirControlFlow]:
         """
-        Group the body of a control flow node into CodeBlocks and other ControlFlow.
+        Group the body of a control flow node into CodeBlocks and other OirControlFlow.
 
         This function only groups statements. The job of visiting the groups statements is
         left to the caller.
         """
-        statements: List[ControlFlow | oir.CodeBlock | common.Stmt] = []
-        groups: List[ControlFlow | oir.CodeBlock] = []
+        statements: List[OirControlFlow | oir.CodeBlock | common.Stmt] = []
+        groups: List[OirControlFlow | oir.CodeBlock] = []
 
         for statement in node.body:
-            if isinstance(statement, ControlFlow):
+            if isinstance(statement, OirControlFlow):
                 if statements != []:
                     groups.append(
                         oir.CodeBlock(label=f"he_{id(node)}_{len(groups)}", body=statements)
@@ -160,6 +191,7 @@ class OIRToTreeIR(eve.NodeVisitor):
             schedule=_resolve_map_schedule(self._device_type),
             children=[],
             parent=ctx.current_scope,
+            groups=[],
         )
 
         with loop.scope(ctx):
@@ -172,136 +204,121 @@ class OIRToTreeIR(eve.NodeVisitor):
                     debuginfo=utils.get_dace_debuginfo(local_scalar),
                 )
 
-            groups = self._group_statements(node)
-            self.visit(groups, ctx=ctx)
+            loop.groups = self._group_statements(node)
+            self.visit(loop.groups, ctx=ctx)
 
-        # Put this on a hook to flip between IF/ELSE and treeir.HR 
-        if self._make_hr_into_he:
-            # Hypothesis are:
-            #   - HorizontalRestriction are NEVER nested into any control flow or into one another
-            #   - HorizontalRestriction ALWAYS apply to both I and J even if only one of the axis is given
-            #     (the other one is the stencil size)
+        if not self._make_hr_into_he:
+            return  # Done: this will be a loop with IfGuard for each regions
 
-            # We need to de-duplicate the loop for each HorizontalRestriction founds
-            # - when you find an HorizontalRestriction
-            # - make a new HorizontalExecution with correct bounds
-            # - go down again from the top, for each child
-            # -     non restricted: add
-            # -     HorizontalRestriction: if same or within bounds, add it
-            # This way we are sure to capture internal offset on local scalars
+        # Hypothesis are:
+        #   - HorizontalRestriction are NEVER nested into any control flow or into one another
+        #   - HorizontalRestriction ALWAYS apply to both I and J even if only one of the axis is given
+        #     (the other one is the stencil size)
 
-            original_loop = loop
-            assert original_loop in ctx.current_scope.children
-            stencil_hl = tir.HorizontalLoop(
-                bounds_i=tir.Bounds(start=axis_start_i, end=axis_end_i),
-                bounds_j=tir.Bounds(start=axis_start_j, end=axis_end_j),
-                schedule=_resolve_map_schedule(self._device_type),
-                children=[],
-                parent=ctx.current_scope,
-            )
+        # We need to write N loops of disjointed bounds and distribute the code withing those bounds
+        # - Go over each child and collect all bounds (HR and main stencil bounds)
+        # - Generate a list of disjointed bounds for the collected bounds
+        # - For each bounds, generate an HorizontalExecution, go down the original childs and copy
+        #   the child that are within this bound (either because they are unrestricted or the HR they
+        #   belong to is contained within the bound)
 
-            # First pass, collect all future HorizontalLoop, including the non-restricted one
-            loops_to_fill = [stencil_hl]
-            for child in original_loop.children:
-                if isinstance(child, tir.HorizontalRestriction):
-                    # Turn HR into HL
-                    i_start = (
-                        _make_bounds_from_horizontal_mask(child.oir_hr.mask.i.start, tir.Axis.I.domain_dace_symbol())
-                        if child.oir_hr.mask.i.start
-                        else stencil_hl.bounds_i.start
-                    )
-                    i_end = str(
-                        _make_bounds_from_horizontal_mask(child.oir_hr.mask.i.end, tir.Axis.I.domain_dace_symbol())
-                        if child.oir_hr.mask.i.end
-                        else stencil_hl.bounds_i.end
-                    )
-                    j_start = str(
-                        _make_bounds_from_horizontal_mask(child.oir_hr.mask.j.start, tir.Axis.J.domain_dace_symbol())
-                        if child.oir_hr.mask.j.start
-                        else stencil_hl.bounds_j.start
-                    )
-                    j_end = str(
-                        _make_bounds_from_horizontal_mask(child.oir_hr.mask.j.end, tir.Axis.J.domain_dace_symbol())
-                        if child.oir_hr.mask.j.end
-                        else stencil_hl.bounds_j.end
-                    )
-                    loops_to_fill.append(tir.HorizontalLoop(
-                        bounds_i=tir.Bounds(start=i_start, end=i_end),
-                        bounds_j=tir.Bounds(start=j_start, end=j_end),
+        # This way we are sure to capture internal offset on local scalars
+
+        # Trash the original loop
+        original_loop = ctx.current_scope.children.pop()
+        assert isinstance(original_loop, tir.HorizontalLoop)
+
+        loops_to_fill: list[tir.HorizontalLoop] = []
+
+        # First pass, collect all bounds expressed in this Horizontal Execution
+        expressed_I_bounds: OrderedSet[tir.Bounds] = OrderedSet()
+        expressed_J_bounds: OrderedSet[tir.Bounds] = OrderedSet()
+
+        for oir_child in original_loop.groups:
+            if isinstance(oir_child, oir.HorizontalRestriction):
+                # Turn mask into bounds
+                bounds = make_IJbounds_from_mask(
+                    oir_child, (original_loop.bounds_i, original_loop.bounds_j)
+                )
+                expressed_I_bounds.add(bounds[0])
+                expressed_J_bounds.add(bounds[1])
+            else:
+                # We have non-restricted nodes, so we need to give the full
+                # stencil bound case as well
+                expressed_I_bounds.add(original_loop.bounds_i)
+                expressed_J_bounds.add(original_loop.bounds_j)
+
+        # Create disjointed bounds
+        disjointed_I_bounds = tir.Bounds.get_disjoint_intervals(*expressed_I_bounds)
+        disjointed_J_bounds = tir.Bounds.get_disjoint_intervals(*expressed_J_bounds)
+
+        # Build disjointed Horizontal Execution from bounds
+        for bounds_I in disjointed_I_bounds:
+            for bounds_J in disjointed_J_bounds:
+                loops_to_fill.append(
+                    tir.HorizontalLoop(
+                        bounds_i=bounds_I,
+                        bounds_j=bounds_J,
                         schedule=_resolve_map_schedule(self._device_type),
                         children=[],
                         parent=ctx.current_scope,
-                    ))
-                    
-            # Second pass, 
-            # - Fill the no-restriction loop skipping restricted nodes
-            for child in original_loop.children:
-                if not isinstance(child, tir.HorizontalRestriction):
-                    new_child = child.copy({})
-                    new_child.parent = stencil_hl
-                    stencil_hl.children.append(new_child)
+                        groups=[],
+                    )
+                )
 
-            # - Distribute child in restricted loops: non-restricted nodes are added, restricted nodes
-            #   are added if they are within the bounds of the restricted loop
-            for loop in loops_to_fill[1:]:
-                for child in original_loop.children:
-                    if isinstance(child, tir.HorizontalRestriction):
-                        i_start = (
-                            _make_bounds_from_horizontal_mask(
-                                child.oir_hr.mask.i.start, tir.Axis.I.domain_dace_symbol()
-                            )
-                            if child.oir_hr.mask.i.start
-                            else stencil_hl.bounds_i.start
-                        )
-                        i_end = str(
-                            _make_bounds_from_horizontal_mask(
-                                child.oir_hr.mask.i.end, tir.Axis.I.domain_dace_symbol()
-                            )
-                            if child.oir_hr.mask.i.end
-                            else stencil_hl.bounds_i.end
-                        )
-                        j_start = str(
-                            _make_bounds_from_horizontal_mask(
-                                child.oir_hr.mask.j.start, tir.Axis.J.domain_dace_symbol()
-                            )
-                            if child.oir_hr.mask.j.start
-                            else stencil_hl.bounds_j.start
-                        )
-                        j_end = str(
-                            _make_bounds_from_horizontal_mask(
-                                child.oir_hr.mask.j.end, tir.Axis.J.domain_dace_symbol()
-                            )
-                            if child.oir_hr.mask.j.end
-                            else stencil_hl.bounds_j.end
-                        )
-                        # ☢️ This is wrong, we need to add all children that are WITHIN scope not just exact
-                        if (
-                            loop.bounds_i.start == i_start
-                            and loop.bounds_i.end == i_end
-                            and loop.bounds_j.start == j_start
-                            and loop.bounds_j.end == j_end
-                        ):
-                            for inner_child in child.children:
-                                new_child = inner_child.copy({})
-                                new_child.parent = loop
-                                loop.children.append(new_child)
-
+        # Distribute original oir nodes in the tir.HE
+        for loop in loops_to_fill:
+            print(f"Loop into {loop.bounds_i} {loop.bounds_j}")
+            for oir_child in original_loop.groups:
+                if isinstance(oir_child, oir.HorizontalRestriction):
+                    bounds = make_IJbounds_from_mask(
+                        oir_child, (original_loop.bounds_i, original_loop.bounds_j)
+                    )
+                    if loop.bounds_i.do_bounds_overlap(
+                        bounds[0]
+                    ) and loop.bounds_j.do_bounds_overlap(bounds[1]):
+                        print(f"  Including {bounds[0]} {bounds[1]}")
+                        hr_groups = self._group_statements(oir_child)
+                        for inner_oir_child in hr_groups:
+                            loop.groups.append(inner_oir_child)
+                        for g in loop.groups:
+                            print(f"    {type(g)}")
                     else:
-                        new_child = child.copy({})
-                        if isinstance(new_child, tir.Tasklet):
-                            new_child.tasklet.label = f"{new_child.tasklet.label}_hr{id(loop)}"
-                        new_child.parent = loop
-                        loop.children.append(new_child)
+                        print(f"  Skipped {bounds[0]} {bounds[1]}")
+                else:
+                    print("  Adding non-restricted node")
+                    loop.groups.append(oir_child)
+                    print(f"    {type(oir_child)}")
 
-            # Trash the original loop
-            ctx.current_scope.children.remove(original_loop)
-
-            # Append all the loops
-            for loop in loops_to_fill:
-                if len(loop.children) == 0: # skip loops that are now empty
+        # For any loops, merge oir.CodeBlocks while insuring order of operations
+        for loop in loops_to_fill:
+            if len(loop.groups) == 0:
+                continue
+            merged_group = [copy.deepcopy(loop.groups[0])]
+            for oir_child in loop.groups[1:]:
+                if not isinstance(oir_child, oir.CodeBlock):
+                    merged_group.append(copy.deepcopy(oir_child))
                     continue
-                loop.parent = ctx.current_scope
-                ctx.current_scope.children.append(loop)
+                previous_node = merged_group[-1]
+                if not isinstance(previous_node, oir.CodeBlock):
+                    merged_group.append(copy.deepcopy(oir_child))
+                    continue
+                for stmt in oir_child.body:
+                    previous_node.body.append(stmt)
+            loop.groups = copy.deepcopy(merged_group)
+            print(f"HL {loop.bounds_i} {loop.bounds_j} has")
+            for g in loop.groups:
+                print(f"  {type(g)}")
+
+        # Turn oir nodes into their tir nodes equivalent
+        for loop in loops_to_fill:
+            if len(loop.groups) == 0:
+                continue
+            print(loop.bounds_i, loop.bounds_j)
+            with loop.scope(ctx):
+                self.visit(loop.groups, ctx=ctx)
+            for child in loop.children:
+                print(type(child))
 
     def visit_MaskStmt(self, node: oir.MaskStmt, ctx: tir.Context) -> None:
         if _is_boolean_scalar(node.mask):
@@ -333,10 +350,9 @@ class OIRToTreeIR(eve.NodeVisitor):
                 oir_hr=node,
                 parent=ctx.current_scope,
                 children=[],
+                groups=self._group_statements(node),
             )
-            with horizontal_restriction.scope(ctx):
-                groups = self._group_statements(node)
-                self.visit(groups, ctx=ctx)                
+            ctx.current_scope.children.append(horizontal_restriction)
         else:
             condition_code = self.visit(node.mask, ctx=ctx)
             if_else = tir.IfElse(
@@ -569,7 +585,7 @@ class OIRToTreeIR(eve.NodeVisitor):
 
         return ctx.root
 
-    # Visit expressions for condition code in ControlFlow
+    # Visit expressions for condition code in OirControlFlow
     def visit_Cast(self, node: oir.Cast, **kwargs: Any) -> str:
         dtype = utils.data_type_to_dace_typeclass(node.dtype)
         expression = self.visit(node.expr, **kwargs)

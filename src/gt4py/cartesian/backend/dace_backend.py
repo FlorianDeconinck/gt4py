@@ -352,7 +352,8 @@ class SDFGManager:
         )
         oir = oir_pipeline.run(oir)
 
-        tir = OIRToTreeIR(self.builder, True).visit(oir)
+        hr_into_he = os.getenv("GT4PY_HRINTOHE", "False").lower() == "true"
+        tir = OIRToTreeIR(self.builder, hr_into_he).visit(oir)
 
         return TreeIRToScheduleTree().visit(tir)
 
