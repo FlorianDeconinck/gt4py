@@ -221,7 +221,6 @@ class OIRToTreeIR(eve.NodeVisitor):
         # - For each bounds, generate an HorizontalExecution, go down the original childs and copy
         #   the child that are within this bound (either because they are unrestricted or the HR they
         #   belong to is contained within the bound)
-
         # This way we are sure to capture internal offset on local scalars
 
         # Trash the original loop
@@ -268,7 +267,6 @@ class OIRToTreeIR(eve.NodeVisitor):
 
         # Distribute original oir nodes in the tir.HE
         for loop in loops_to_fill:
-            print(f"Loop into {loop.bounds_i} {loop.bounds_j}")
             for oir_child in original_loop.groups:
                 if isinstance(oir_child, oir.HorizontalRestriction):
                     bounds = make_IJbounds_from_mask(
@@ -277,18 +275,11 @@ class OIRToTreeIR(eve.NodeVisitor):
                     if loop.bounds_i.do_bounds_overlap(
                         bounds[0]
                     ) and loop.bounds_j.do_bounds_overlap(bounds[1]):
-                        print(f"  Including {bounds[0]} {bounds[1]}")
                         hr_groups = self._group_statements(oir_child)
                         for inner_oir_child in hr_groups:
                             loop.groups.append(inner_oir_child)
-                        for g in loop.groups:
-                            print(f"    {type(g)}")
-                    else:
-                        print(f"  Skipped {bounds[0]} {bounds[1]}")
                 else:
-                    print("  Adding non-restricted node")
                     loop.groups.append(oir_child)
-                    print(f"    {type(oir_child)}")
 
         # For any loops, merge oir.CodeBlocks while insuring order of operations
         for loop in loops_to_fill:
@@ -306,19 +297,13 @@ class OIRToTreeIR(eve.NodeVisitor):
                 for stmt in oir_child.body:
                     previous_node.body.append(stmt)
             loop.groups = copy.deepcopy(merged_group)
-            print(f"HL {loop.bounds_i} {loop.bounds_j} has")
-            for g in loop.groups:
-                print(f"  {type(g)}")
 
         # Turn oir nodes into their tir nodes equivalent
         for loop in loops_to_fill:
             if len(loop.groups) == 0:
                 continue
-            print(loop.bounds_i, loop.bounds_j)
             with loop.scope(ctx):
                 self.visit(loop.groups, ctx=ctx)
-            for child in loop.children:
-                print(type(child))
 
     def visit_MaskStmt(self, node: oir.MaskStmt, ctx: tir.Context) -> None:
         if _is_boolean_scalar(node.mask):
